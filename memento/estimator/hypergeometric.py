@@ -3,7 +3,6 @@ import logging
 import numpy as np
 import scipy.sparse as sparse
 import scipy.stats as stats
-import util as util
 
 
 def fill_invalid(val, group_name):
@@ -42,7 +41,7 @@ def unique_expr(expr, size_factor):
     return 1 / approx_sf[index].reshape(-1, 1), 1 / approx_sf[index].reshape(-1, 1) ** 2, expr_to_return, count
 
 
-def mean(X: sparse.csc_matrix, q: float, sample_mean: float, variance: float, size_factor: np.array):
+def hg_mean(X: sparse.csc_matrix, q: float, sample_mean: float, variance: float, size_factor: np.array):
     """ Inverse variance weighted mean. """
     cell_variance = (1-q) / size_factors * sample_mean + variance
 
@@ -55,7 +54,7 @@ def mean(X: sparse.csc_matrix, q: float, sample_mean: float, variance: float, si
     return np.average(np.nan_to_num(norm_X), weights=cell_variance)
 
 
-def sem(variance, n_obs: int):
+def hg_sem(variance, n_obs: int):
     """ Approximate standard error of the mean. """
 
     if variance < 0:
@@ -65,7 +64,7 @@ def sem(variance, n_obs: int):
     return np.sqrt(variance/n_obs)
 
 
-def variance(X: sparse.csc_matrix, q: float, size_factor: np.array, group_name=None):
+def hg_variance(X: sparse.csc_matrix, q: float, size_factor: np.array, group_name=None):
     """ Compute the variances. """
 
     n_obs = X.shape[0]
@@ -79,11 +78,7 @@ def variance(X: sparse.csc_matrix, q: float, size_factor: np.array, group_name=N
     mean = mm_M1
     variance = (mm_M2 - mm_M1 ** 2)
 
-    if variance < 0:
-        logging.warning(f"negative variance ({variance}) for group {group_name}: {X.data}")
-        variance = mean
-
-    return float(variance)
+    return variance
 
 
 def bootstrap_variance(
@@ -104,7 +99,7 @@ def bootstrap_variance(
     return variance
 
 
-def sev(
+def hg_sev(
         X: sparse.csc_matrix,
         q: float,
         approx_size_factor: np.array,

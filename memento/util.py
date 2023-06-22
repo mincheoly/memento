@@ -19,7 +19,7 @@ def bin_size_factor(size_factor, num_bins=30):
 
 
 
-def _select_cells(adata, group):
+def select_cells(adata, group):
     """ Slice the data horizontally. """
 
     cell_selector = (adata.obs['memento_group'] == group).values
@@ -27,13 +27,13 @@ def _select_cells(adata, group):
     return adata.X[cell_selector, :].tocsc()
 
 
-def _get_gene_idx(adata, gene_list):
+def get_gene_idx(adata, gene_list):
     """ Returns the indices of each gene in the list. """
 
     return np.array([np.where(adata.var.index == gene)[0][0] for gene in gene_list]) # maybe use np.isin
 
 
-def _fdrcorrect(pvals):
+def fdrcorrect(pvals):
     """
     Perform FDR correction with nan's.
     """
