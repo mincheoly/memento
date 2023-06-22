@@ -42,20 +42,20 @@ def unique_expr(expr, size_factor):
     return 1 / approx_sf[index].reshape(-1, 1), 1 / approx_sf[index].reshape(-1, 1) ** 2, expr_to_return, count
 
 
-def compute_mean(X: np.array, q: float, sample_mean: float, variance: float, size_factors: np.array):
+def mean(X: sparse.csc_matrix, q: float, sample_mean: float, variance: float, size_factor: np.array):
     """ Inverse variance weighted mean. """
     cell_variance = (1-q) / size_factors * sample_mean + variance
 
     norm_X = X * (1 / size_factors)
 
     if cell_variance.sum() == 0:
-        logging.warning(f"compute_mean(): weights sum is zero; {sample_mean=}, {variance=}, size_factors count={len(size_factors)}")
+        logging.warning(f"mean(): weights sum is zero; {sample_mean=}, {variance=}, size_factors count={len(size_factors)}")
         cell_variance = None
 
     return np.average(np.nan_to_num(norm_X), weights=cell_variance)
 
 
-def compute_sem(variance, n_obs: int):
+def sem(variance, n_obs: int):
     """ Approximate standard error of the mean. """
 
     if variance < 0:
@@ -65,8 +65,7 @@ def compute_sem(variance, n_obs: int):
     return np.sqrt(variance/n_obs)
 
 
-
-def compute_variance(X: sparse.csc_matrix, q: float, size_factor: np.array, group_name=None):
+def variance(X: sparse.csc_matrix, q: float, size_factor: np.array, group_name=None):
     """ Compute the variances. """
 
     n_obs = X.shape[0]
@@ -84,10 +83,10 @@ def compute_variance(X: sparse.csc_matrix, q: float, size_factor: np.array, grou
         logging.warning(f"negative variance ({variance}) for group {group_name}: {X.data}")
         variance = mean
 
-    return float(mean), float(variance)
+    return float(variance)
 
 
-def compute_bootstrap_variance(
+def bootstrap_variance(
         unique_expr: np.array,
         bootstrap_freq: np.array,
         q: float,
@@ -105,7 +104,7 @@ def compute_bootstrap_variance(
     return variance
 
 
-def compute_sev(
+def sev(
         X: sparse.csc_matrix,
         q: float,
         approx_size_factor: np.array,
@@ -123,7 +122,7 @@ def compute_sev(
     gen = np.random.Generator(np.random.PCG64(5))
     gene_rvs = gen.multinomial(n_obs, counts / counts.sum(), size=num_boot).T
 
-    var = compute_bootstrap_variance(
+    var = bootstrap_variance(
         unique_expr=expr,
         bootstrap_freq=gene_rvs,
         n_obs=n_obs,
@@ -138,3 +137,27 @@ def compute_sev(
     selv = np.nanstd(np.log(var))
 
     return sev, selv
+
+
+def fit_mv_regressor(mean, var):
+    """
+        Perform regression of the variance against the mean.
+    """
+
+    cond = (mean > 0) & (var > 0)
+    m, v = np.log(mean[cond]), np.log(var[cond])
+
+    poly = np.polyfit(m, v, 2)
+    return poly
+    f = np.poly1d(z)
+    
+
+def residual_variance(mean, var, mv_fit):
+
+    cond = (mean > 0) & (var > 0)
+    rv = np.zeros(mean.shape)*np.nan
+
+    f = np.poly1d(mv_fit)
+    with np.errstate(invalid='ignore'):
+        rv[cond] = np.exp(np.log(var[cond]) - f(np.log(mean[cond])))
+    return rv
