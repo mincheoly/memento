@@ -1,6 +1,9 @@
 import scanpy as sc
 import numpy as np
+import pandas as pd
 import logging
+
+from collections import OrderedDict
 
 from memento.estimator.hypergeometric import (
     hg_mean, 
@@ -8,7 +11,7 @@ from memento.estimator.hypergeometric import (
     residual_variance, 
     fit_mv_regressor
 )
-from memento.estimator.sample import sample_mean
+from memento.estimator.sample import sample_mean, sample_variance
 from memento.util import select_cells
 
 class MementoRNA():
@@ -19,11 +22,26 @@ class MementoRNA():
     def __init__(
         self,
         adata: sc.AnnData,
-        q_column: str
+        layer=None,
     ):
         self.adata = adata
-        self.q_column = q_column
-        self.estimands = ['mean', 'variance', 'correlation']
+        self.layer = layer
+        self.estimator_names = [
+            'mean', 
+            'sem', 
+            'var',
+            'sev', 
+            'selv',
+            'corr',
+            'sec'
+        ]
+        self.estimator_1d_names = [
+            'mean', 
+            'sem', 
+            'var',
+            'sev', 
+            'selv',]
+        self.estimates = {}
         
     
     @classmethod
@@ -36,7 +54,7 @@ class MementoRNA():
     ):
         adata.uns['memento'] = {}
         adata.uns['memento']['q_column'] = q_column
-        adata.uns['memento']['q'] = adata.obs[q_column].values
+        adata.uns['memento']['q'] = adata.obs[q_column]
         
         logging.info(f'setup_anndata: creating groups')
         cls.create_groups(adata=adata,label_columns=label_columns, **kwargs)
@@ -64,10 +82,10 @@ class MementoRNA():
         adata.uns['memento']['groups'] = adata.obs['memento_group'].drop_duplicates().tolist()
 
         # Create slices of the data based on the group
-        adata.uns['memento']['group_cells'] = {group:select_cells(adata, group) for group in adata.uns['memento']['groups']}
+        adata.uns['memento']['group_barcodes'] = {group:select_cells(adata, group) for group in adata.uns['memento']['groups']}
 
         # For each slice, get mean q
-        adata.uns['memento']['group_q'] = {group:adata.uns['memento']['q'][(adata.obs['memento_group'] == group).values].mean() for group in adata.uns['memento']['groups']}
+        adata.uns['memento']['group_q'] = {group:adata.uns['memento']['q'][adata.uns['memento']['group_barcodes'][group]].values.mean() for group in adata.uns['memento']['groups']}
         
 
     @classmethod
@@ -115,3 +133,69 @@ class MementoRNA():
         size_factor = size_factor / np.median(size_factor)
         size_factor = size_factor * umi_depth
         adata.obs['memento_size_factor'] = size_factor
+    
+    
+    def subset_matrix(self, barcodes, genes):
+        """ Get a subset of the expr matrix for specific barcodes and genes. """
+        subset = self.adata[barcodes, genes]
+        if self.layer is not None:
+            return subset.layers[self.layer]
+        else:
+            return subset.X
+        
+    
+    def compute_estimate(self, estimator, gene_list=None, gene_pairs=None):
+        """
+            Compute the estimand.
+        """ 
+        
+        if type(estimator) == str:
+            
+            estimator = [estimator]
+        estimates = {est:OrderedDict() for est in estimator}
+        
+        for group, barcodes in self.adata.uns['memento']['group_barcodes'].items():
+            
+            data = self.subset_matrix(barcodes, gene_list)
+            sf = self.adata.obs.loc[barcodes]['memento_size_factor'].values
+            q = self.adata.uns['memento']['group_q'][group]
+        
+            for est in estimator:
+
+                if est not in self.estimator_names:
+
+                    logging.error(f'compute_estimate: {est} estimator is not available')
+                    raise
+
+                if est == 'mean':
+                
+                    # Sample mean for now
+                    estimates[est][group] = sample_mean(X=data, size_factor=sf)
+                    
+                elif est == 'sem':
+                    
+                    estimates[est][group] = sample_variance(X=data, size_factor=sf)/data.shape[0]
+                    
+                elif est == 'variance':
+                    
+                    estimates[est][group] = hg_variance(X=data, q=q, size_factor=sf, group_name=group)
+                
+                else:
+                    
+                    logging.warning('not yet implemented!')
+                    
+        for est,res in estimates.items():
+            
+            if est in self.estimator_1d_names:
+                
+                self.estimates[est] = pd.DataFrame(res, index=gene_list).T
+                
+            else:
+                
+                logging.warning('not yet implemented!')
+                            
+                    
+                    
+                
+                
+        

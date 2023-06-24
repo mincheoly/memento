@@ -18,13 +18,16 @@ def bin_size_factor(size_factor, num_bins=30):
     return approx_sf
 
 
-
 def select_cells(adata, group):
     """ Slice the data horizontally. """
 
-    cell_selector = (adata.obs['memento_group'] == group).values
+    # cell_selector = (adata.obs['memento_group'] == group).values
 
-    return adata.X[cell_selector, :].tocsc()
+    # return adata.X[cell_selector, :].tocsc()
+    
+    cell_selector = adata.obs['memento_group'][adata.obs['memento_group'] == group].index.tolist()
+    
+    return cell_selector
 
 
 def get_gene_idx(adata, gene_list):

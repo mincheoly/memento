@@ -78,7 +78,7 @@ def hg_variance(X: sparse.csc_matrix, q: float, size_factor: np.array, group_nam
     mean = mm_M1
     variance = (mm_M2 - mm_M1 ** 2)
 
-    return variance
+    return variance if len(variance) > 1 else float(variance)
 
 
 def bootstrap_variance(
