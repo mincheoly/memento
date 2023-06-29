@@ -2,6 +2,7 @@ import scanpy as sc
 import numpy as np
 import pandas as pd
 import logging
+import statsmodels.api as sm
 
 from collections import OrderedDict
 
@@ -12,11 +13,11 @@ from memento.estimator.hypergeometric import (
     fit_mv_regressor
 )
 from memento.estimator.sample import sample_mean, sample_variance
-from memento.util import select_cells
+from memento.util import select_cells, fit_nb
 
 class MementoRNA():
     """
-        Class for performing differential exmpression testing on scRNA-seq data.
+        Class for performing differential expression testing on scRNA-seq data.
     """
     
     def __init__(
@@ -33,14 +34,21 @@ class MementoRNA():
             'sev', 
             'selv',
             'corr',
-            'sec'
+            'sec',
+            'total_umi',
+            'cell_count',
         ]
         self.estimator_1d_names = [
             'mean', 
             'sem', 
             'var',
             'sev', 
-            'selv',]
+            'selv',
+        ]
+        self.estimator_group_names = [
+            'total_umi',
+            'cell_count'
+        ]
         self.estimates = {}
         
     
@@ -70,7 +78,7 @@ class MementoRNA():
         label_columns: list, 
         label_delimiter: str = '^'
     ):
-        adata.obs['memento_group'] = 'sg' + label_delimiter
+        adata.obs['memento_group'] = 'memento_group' + label_delimiter
         for idx, col_name in enumerate(label_columns):
             adata.obs['memento_group'] += adata.obs[col_name].astype(str)
             if idx != len(label_columns)-1:
@@ -154,6 +162,10 @@ class MementoRNA():
             estimator = [estimator]
         estimates = {est:OrderedDict() for est in estimator}
         
+        if gene_list is None:
+            logging.info(f'compute_estimate: gene_list is None, using all genes...')
+            gene_list = self.adata.var.index.tolist()
+        
         for group, barcodes in self.adata.uns['memento']['group_barcodes'].items():
             
             data = self.subset_matrix(barcodes, gene_list)
@@ -169,20 +181,27 @@ class MementoRNA():
 
                 if est == 'mean':
                 
-                    # Sample mean for now
-                    estimates[est][group] = sample_mean(X=data, size_factor=sf)
+                    estimates[est][group] = hg_mean(X=data, size_factor=sf)
                     
                 elif est == 'sem':
                     
                     estimates[est][group] = sample_variance(X=data, size_factor=sf)/data.shape[0]
                     
-                elif est == 'variance':
+                elif est == 'var':
                     
                     estimates[est][group] = hg_variance(X=data, q=q, size_factor=sf, group_name=group)
                 
-                else:
+                elif est == 'total_umi':
                     
-                    logging.warning('not yet implemented!')
+                    estimates[est][group] = data.sum()
+                
+                elif est == 'cell_count':
+                    
+                    estimates[est][group] = data.shape[0]
+                    
+                else:
+                    logging.warning(f'compute_estimate: {est} estimator not yet implemented!')
+                    raise NotImplementedError()
                     
         for est,res in estimates.items():
             
@@ -190,10 +209,67 @@ class MementoRNA():
                 
                 self.estimates[est] = pd.DataFrame(res, index=gene_list).T
                 
+            elif est in self.estimator_group_names:
+                
+                self.estimates[est] = pd.DataFrame(res, index=[est]).T
+                
             else:
                 
-                logging.warning('not yet implemented!')
-                            
+                logging.warning(f'compute_estimates: storage for {est} not yet implemented!')
+                
+        
+        def differential_mean(
+            self, 
+            covariates: pd.DataFrame,
+            treatments: pd.DataFrame,
+            family: str = 'NB'):
+            """ Perform differential expression using the given design matrix. """
+            
+            if family == 'NB':
+                # Transform mean estimate to "pseudobulk"
+                expr = self.estimates['mean']*self.estimates['total_umi'].values
+                expr_se = self.estimates['sem']*self.estimates['cell_count'].values**2
+
+                # Transform standard error to weights
+                weights = np.sqrt(1/expr_se).replace([-np.inf, np.inf], np.nan)
+                mean_weight = np.nanmean(weights)
+                weights /= mean_weight
+                weights = weights.fillna(1.0)
+
+                # Add expr to get total
+
+                results = []
+                for idx, gene in enumerate(expr.columns):
+                    
+                    for t in treatments.columns:
+                        
+                        design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
+                        try:
+                            fit = fit_nb(
+                                endog=expr.iloc[:, [idx]],
+                                exog=design_matrix, 
+                                offset=np.log(self.estimates['total_umi']['total_umi'].values),
+                                weights=weights.iloc[:, [idx]])
+                            res_fit = fit_nb(
+                                endog=expr.iloc[:, [idx]],
+                                exog=covariates, 
+                                offset=np.log(self.estimates['total_umi']['total_umi'].values),
+                                weights=weights.iloc[:, [idx]])
+                        except:
+                            results.append((gene, t, 0, 1))
+                            continue
+                        
+                        pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
+                        results.append((gene, t, fit.params[-1], pv)), 
+            
+            
+            
+            
+            
+            
+            
+            
+            
                     
                     
                 

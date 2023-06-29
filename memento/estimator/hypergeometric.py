@@ -5,6 +5,11 @@ import scipy.sparse as sparse
 import scipy.stats as stats
 
 
+def return_float(val):
+    
+    return val if len(val) > 1 else float(val)
+
+
 def fill_invalid(val, group_name):
     """ Fill invalid entries by randomly selecting a valid entry. """
 
@@ -41,17 +46,12 @@ def unique_expr(expr, size_factor):
     return 1 / approx_sf[index].reshape(-1, 1), 1 / approx_sf[index].reshape(-1, 1) ** 2, expr_to_return, count
 
 
-def hg_mean(X: sparse.csc_matrix, q: float, sample_mean: float, variance: float, size_factor: np.array):
+def hg_mean(X: sparse.csc_matrix, size_factor: np.array):
     """ Inverse variance weighted mean. """
-    cell_variance = (1-q) / size_factors * sample_mean + variance
 
-    norm_X = X * (1 / size_factors)
-
-    if cell_variance.sum() == 0:
-        logging.warning(f"mean(): weights sum is zero; {sample_mean=}, {variance=}, size_factors count={len(size_factors)}")
-        cell_variance = None
-
-    return np.average(np.nan_to_num(norm_X), weights=cell_variance)
+    mean = X.sum(axis=0).A1/size_factor.sum()
+    
+    return return_float(mean)
 
 
 def hg_sem(variance, n_obs: int):
@@ -78,8 +78,7 @@ def hg_variance(X: sparse.csc_matrix, q: float, size_factor: np.array, group_nam
     mean = mm_M1
     variance = (mm_M2 - mm_M1 ** 2)
 
-    return variance if len(variance) > 1 else float(variance)
-
+    return return_float(variance)
 
 def bootstrap_variance(
         unique_expr: np.array,

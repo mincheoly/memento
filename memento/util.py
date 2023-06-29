@@ -38,9 +38,38 @@ def get_gene_idx(adata, gene_list):
 
 def fdrcorrect(pvals):
     """
-    Perform FDR correction with nan's.
+        Perform FDR correction with nan's.
     """
 
     fdr = np.ones(pvals.shape[0])
     _, fdr[~np.isnan(pvals)] = fdrcorrection(pvals[~np.isnan(pvals)])
     return fdr
+
+
+def fit_nb(endog, exog, offset, weights=None):
+    """
+        Fit a negative binomial GLM using Poisson as a starting guess
+    """
+    
+    poi = sm.GLM(
+        endog,
+        exog, 
+        offset=offset,
+        var_weights=weights,
+        family=sm.families.Poisson()).fit()
+
+    mu = poi.predict()
+    resid = poi.resid_response
+    df_resid=poi.df_resid
+
+    alpha = ((resid**2 / mu - 1) / mu).sum() / df_resid
+    
+    nb = sm.GLM(
+        endog,
+        exog, 
+        offset=offset,
+        var_weights=weights,
+        family=sm.families.NegativeBinomial(alpha=alpha))\
+        .fit(start_params=poi.params)
+    
+    return nb
