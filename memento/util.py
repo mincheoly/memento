@@ -3,6 +3,7 @@ import numpy as np
 import time
 import itertools
 import scipy as sp
+import statsmodels.api as sm
 from statsmodels.stats.multitest import fdrcorrection
 
 
@@ -46,30 +47,34 @@ def fdrcorrect(pvals):
     return fdr
 
 
-def fit_nb(endog, exog, offset, weights=None):
+def fit_nb(endog, exog, offset, alpha=None, weights=None):
     """
         Fit a negative binomial GLM using Poisson as a starting guess
     """
     
-    poi = sm.GLM(
-        endog,
-        exog, 
-        offset=offset,
-        var_weights=weights,
-        family=sm.families.Poisson()).fit()
+    if alpha is None:
+        # Fit a preliminary Poisson model
+        poi = sm.GLM(
+            endog,
+            exog, 
+            offset=offset,
+            family=sm.families.Poisson()).fit()
 
-    mu = poi.predict()
-    resid = poi.resid_response
-    df_resid=poi.df_resid
+        # Estimate alpha
+        mu = poi.predict()
+        resid = poi.resid_response
+        df_resid=poi.df_resid
 
-    alpha = ((resid**2 / mu - 1) / mu).sum() / df_resid
-    
+        alpha = ((resid**2 / mu - 1) / mu).sum() / df_resid
+        alpha = max(alpha, 1e-5)
+        
+    # Fit a GLM
     nb = sm.GLM(
         endog,
         exog, 
         offset=offset,
         var_weights=weights,
         family=sm.families.NegativeBinomial(alpha=alpha))\
-        .fit(start_params=poi.params)
+        .fit()
     
-    return nb
+    return alpha, nb

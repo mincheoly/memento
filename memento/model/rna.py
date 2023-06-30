@@ -2,7 +2,7 @@ import scanpy as sc
 import numpy as np
 import pandas as pd
 import logging
-import statsmodels.api as sm
+import scipy.stats as stats
 
 from collections import OrderedDict
 
@@ -35,6 +35,7 @@ class MementoRNA():
             'selv',
             'corr',
             'sec',
+            'sum',
             'total_umi',
             'cell_count',
         ]
@@ -44,6 +45,7 @@ class MementoRNA():
             'var',
             'sev', 
             'selv',
+            'sum',
         ]
         self.estimator_group_names = [
             'total_umi',
@@ -191,6 +193,10 @@ class MementoRNA():
                     
                     estimates[est][group] = hg_variance(X=data, q=q, size_factor=sf, group_name=group)
                 
+                elif est == 'sum':
+                    
+                    estimates[est][group] = data.sum(axis=0).A1
+                
                 elif est == 'total_umi':
                     
                     estimates[est][group] = data.sum()
@@ -217,51 +223,60 @@ class MementoRNA():
                 
                 logging.warning(f'compute_estimates: storage for {est} not yet implemented!')
                 
-        
-        def differential_mean(
-            self, 
-            covariates: pd.DataFrame,
-            treatments: pd.DataFrame,
-            family: str = 'NB'):
-            """ Perform differential expression using the given design matrix. """
-            
-            if family == 'NB':
-                # Transform mean estimate to "pseudobulk"
-                expr = self.estimates['mean']*self.estimates['total_umi'].values
-                expr_se = self.estimates['sem']*self.estimates['cell_count'].values**2
 
-                # Transform standard error to weights
-                weights = np.sqrt(1/expr_se).replace([-np.inf, np.inf], np.nan)
-                mean_weight = np.nanmean(weights)
-                weights /= mean_weight
-                weights = weights.fillna(1.0)
+    def differential_mean(
+        self, 
+        covariates: pd.DataFrame,
+        treatments: pd.DataFrame,
+        family: str = 'NB'):
+        """ Perform differential expression using the given design matrix. """
 
-                # Add expr to get total
+        # Index the estimates by the groups actually present
+        groups_in_test = covariates.index.tolist()
+        test_estimates = {est:res.loc[groups_in_test] for est,res in self.estimates.items()}
 
-                results = []
-                for idx, gene in enumerate(expr.columns):
+        if family == 'NB':
+            # Transform mean estimate to "pseudobulk"
+            expr = test_estimates['mean']*test_estimates['total_umi'].values
+            expr_se = test_estimates['sem']*test_estimates['cell_count'].values**2
+
+            # Transform standard error to weights
+            weights = np.sqrt(1/expr_se).replace([-np.inf, np.inf], np.nan)
+            mean_weight = np.nanmean(weights)
+            weights /= mean_weight
+            weights = weights.fillna(1.0)            
+
+            results = []
+            for idx, gene in enumerate(expr.columns):
+                
+                if idx+1 % 1000 == 0:
+                    logging.info(f'differential_mean: on {idx+1}th gene')
+
+                for t in treatments.columns:
                     
-                    for t in treatments.columns:
-                        
-                        design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
-                        try:
-                            fit = fit_nb(
-                                endog=expr.iloc[:, [idx]],
-                                exog=design_matrix, 
-                                offset=np.log(self.estimates['total_umi']['total_umi'].values),
-                                weights=weights.iloc[:, [idx]])
-                            res_fit = fit_nb(
-                                endog=expr.iloc[:, [idx]],
-                                exog=covariates, 
-                                offset=np.log(self.estimates['total_umi']['total_umi'].values),
-                                weights=weights.iloc[:, [idx]])
-                        except:
-                            results.append((gene, t, 0, 1))
-                            continue
-                        
-                        pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
-                        results.append((gene, t, fit.params[-1], pv)), 
+                    design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
+
+                    try:
+                        alpha, fit = fit_nb(
+                            endog=expr.iloc[:, [idx]],
+                            exog=design_matrix, 
+                            offset=np.log(test_estimates['total_umi']['total_umi'].values),
+                            weights=weights.iloc[:, idx])
+                        _, res_fit = fit_nb(
+                            endog=expr.iloc[:, [idx]],
+                            exog=covariates, 
+                            offset=np.log(test_estimates['total_umi']['total_umi'].values),
+                            weights=weights.iloc[:, idx],
+                            alpha=alpha)
+                    except:
+                        results.append((gene, t, 0, 1))
+                        continue
+
+                    pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
+                    results.append((gene, t, fit.params[-1], pv))
             
+            return pd.DataFrame(results, columns=['gene', 'treatment', 'coef', 'pval'])
+
             
             
             
