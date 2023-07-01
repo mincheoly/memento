@@ -5,6 +5,8 @@ import logging
 import scipy.stats as stats
 
 from collections import OrderedDict
+from joblib import Parallel, delayed
+from functools import partial
 
 from memento.estimator.hypergeometric import (
     hg_mean, 
@@ -13,7 +15,7 @@ from memento.estimator.hypergeometric import (
     fit_mv_regressor
 )
 from memento.estimator.sample import sample_mean, sample_variance
-from memento.util import select_cells, fit_nb
+from memento.util import select_cells, fit_nb, lrt_nb, meta_wls
 
 class MementoRNA():
     """
@@ -141,7 +143,7 @@ class MementoRNA():
         if shrinkage > 0:
             size_factor += np.quantile(size_factor, shrinkage)
         size_factor = size_factor / np.median(size_factor)
-        size_factor = size_factor * umi_depth
+        # size_factor = size_factor * umi_depth
         adata.obs['memento_size_factor'] = size_factor
     
     
@@ -165,7 +167,7 @@ class MementoRNA():
         estimates = {est:OrderedDict() for est in estimator}
         
         if gene_list is None:
-            logging.info(f'compute_estimate: gene_list is None, using all genes...')
+            logging.info(f'compute_estimate: gene_list is None, using all genes in AnnData object...')
             gene_list = self.adata.var.index.tolist()
         
         for group, barcodes in self.adata.uns['memento']['group_barcodes'].items():
@@ -187,7 +189,7 @@ class MementoRNA():
                     
                 elif est == 'sem':
                     
-                    estimates[est][group] = sample_variance(X=data, size_factor=sf)/data.shape[0]
+                    estimates[est][group] = np.sqrt(sample_variance(X=data, size_factor=sf)/data.shape[0])
                     
                 elif est == 'var':
                     
@@ -222,13 +224,16 @@ class MementoRNA():
             else:
                 
                 logging.warning(f'compute_estimates: storage for {est} not yet implemented!')
-                
+    
 
     def differential_mean(
         self, 
         covariates: pd.DataFrame,
         treatments: pd.DataFrame,
-        family: str = 'NB'):
+        treatment_for_gene: dict = None,
+        family: str = 'NB',
+        n_jobs=1,
+        verbose=0):
         """ Perform differential expression using the given design matrix. """
 
         # Index the estimates by the groups actually present
@@ -246,36 +251,79 @@ class MementoRNA():
             weights /= mean_weight
             weights = weights.fillna(1.0)            
 
-            results = []
+            # Construct the tests
+            tests = []  
             for idx, gene in enumerate(expr.columns):
                 
-                if idx+1 % 1000 == 0:
-                    logging.info(f'differential_mean: on {idx+1}th gene')
-
-                for t in treatments.columns:
+                if treatment_for_gene is not None:
+                    if gene in treatment_for_gene: # Get treatments for this gene
+                        treatment_list = treatment_for_gene[gene]
+                    else: # Pass this gene
+                        continue
+                else: # Default, get all pairwise treatment-gene tests
+                    treatment_list = treatments.columns
+                    
+                for t in treatment_list:
                     
                     design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
+                    
+                    tests.append(
+                        partial(
+                            lrt_nb,
+                            endog=expr.iloc[:, [idx]], 
+                            exog=design_matrix,
+                            exog0=covariates, 
+                            offset=np.log(test_estimates['total_umi']['total_umi'].values), 
+                            weights=weights.iloc[:, idx], 
+                            gene=gene, 
+                            t=t))
+                    
+            # Compute the tests in parallel
+            result = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in tests)
+            return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'pval']).set_index('gene')
+    
+        if family == 'WLS':
 
-                    try:
-                        alpha, fit = fit_nb(
-                            endog=expr.iloc[:, [idx]],
-                            exog=design_matrix, 
-                            offset=np.log(test_estimates['total_umi']['total_umi'].values),
-                            weights=weights.iloc[:, idx])
-                        _, res_fit = fit_nb(
-                            endog=expr.iloc[:, [idx]],
-                            exog=covariates, 
-                            offset=np.log(test_estimates['total_umi']['total_umi'].values),
-                            weights=weights.iloc[:, idx],
-                            alpha=alpha)
-                    except:
-                        results.append((gene, t, 0, 1))
-                        continue
+            test_estimates['log1p_mean'] = np.log(test_estimates['mean']+1)
+            l = np.log((test_estimates['mean']+1) - test_estimates['sem'])
+            u = np.log((test_estimates['mean']+1) + test_estimates['sem'])
+            test_estimates['log1p_sem'] = (u-l)/2
 
-                    pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
-                    results.append((gene, t, fit.params[-1], pv))
+            expr = test_estimates['log1p_mean']
+            expr_sem = test_estimates['log1p_sem']
+            min_sem = expr_sem[expr_sem > 0].min(axis=0)
+            for col in expr_sem.columns:
+                expr_sem[col] = expr_sem[col].replace(0.0, min_sem[col])
             
-            return pd.DataFrame(results, columns=['gene', 'treatment', 'coef', 'pval'])
+            # Construct the tests
+            tests = []  
+            for idx, gene in enumerate(expr.columns):
+                
+                if treatment_for_gene is not None:
+                    if gene in treatment_for_gene: # Get treatments for this gene
+                        treatment_list = treatment_for_gene[gene]
+                    else: # Pass this gene
+                        continue
+                else: # Default, get all pairwise treatment-gene tests
+                    treatment_list = treatments.columns
+                    
+                for t in treatment_list:
+                    
+                    design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
+                    
+                    tests.append(
+                        partial(
+                            meta_wls,
+                            y=expr.iloc[:, [idx]].values, 
+                            X=design_matrix.values,
+                            v=expr_sem.iloc[:, [idx]].values**2,
+                            gene=gene, 
+                            t=t))
+                    
+            # Compute the tests in parallel
+            result = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in tests)
+            return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'pval']).set_index('gene')
+            
 
             
             

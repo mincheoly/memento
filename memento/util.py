@@ -5,6 +5,8 @@ import itertools
 import scipy as sp
 import statsmodels.api as sm
 from statsmodels.stats.multitest import fdrcorrection
+from pymare import estimators
+
 
 
 def bin_size_factor(size_factor, num_bins=30):
@@ -52,6 +54,7 @@ def fit_nb(endog, exog, offset, alpha=None, weights=None):
         Fit a negative binomial GLM using Poisson as a starting guess
     """
     
+
     if alpha is None:
         # Fit a preliminary Poisson model
         poi = sm.GLM(
@@ -67,7 +70,8 @@ def fit_nb(endog, exog, offset, alpha=None, weights=None):
 
         alpha = ((resid**2 / mu - 1) / mu).sum() / df_resid
         alpha = max(alpha, 1e-5)
-        
+        alpha = min(alpha, 10)
+
     # Fit a GLM
     nb = sm.GLM(
         endog,
@@ -78,3 +82,43 @@ def fit_nb(endog, exog, offset, alpha=None, weights=None):
         .fit()
     
     return alpha, nb
+
+
+def lrt_nb(endog, exog, exog0, offset, weights=None, gene=None, t=None):
+    """
+        Perform a likelihood ratio test using NB GLM.
+    """
+
+    try:
+        alpha, fit = fit_nb(
+            endog=endog,
+            exog=exog, 
+            offset=offset,
+            weights=weights)
+        _, res_fit = fit_nb(
+            endog=endog,
+            exog=exog0, 
+            offset=offset,
+            weights=weights,
+            alpha=alpha)
+    except:
+        return((gene, t, 0, 1))
+
+    pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
+    return((gene, t, fit.params[-1], pv))
+
+
+def meta_wls(y, X, v, gene=None, t=None):
+    try:
+        dsl = estimators.DerSimonianLaird()
+        dsl.fit(y=y, X=X, v=v)
+        coef = float(dsl.summary().get_fe_stats()['est'][-1])
+        p = float(dsl.summary().get_fe_stats()['p'][-1])
+        
+        # model = sm.OLS(y, X).fit()
+        # coef = model.params[-1]
+        # p = model.pvalues[-1]
+    except:
+        return((gene, t, 0, 1))
+    
+    return ((gene, t, coef, p))
