@@ -10,7 +10,9 @@ from functools import partial
 
 from memento.estimator.hypergeometric import (
     hg_mean, 
+    hg_sem_for_gene,
     hg_variance, 
+    hg_sev_for_gene,
     residual_variance, 
     fit_mv_regressor
 )
@@ -29,30 +31,30 @@ class MementoRNA():
     ):
         self.adata = adata
         self.layer = layer
-        self.estimator_names = [
-            'mean', 
-            'sem', 
-            'var',
-            'sev', 
-            'selv',
-            'corr',
-            'sec',
-            'sum',
-            'total_umi',
-            'cell_count',
+        self.mean_estimator_names = [
+            'mean',
+            'log_mean',
+            'log1p_mean',
         ]
-        self.estimator_1d_names = [
-            'mean', 
-            'sem', 
+        self.var_estimator_names = [
             'var',
-            'sev', 
-            'selv',
-            'sum',
+            'log_var',
+            'resvar',
+        ]
+        self.corr_estimator_names = [
+            'corr',
+            'se_corr',
         ]
         self.estimator_group_names = [
             'total_umi',
             'cell_count'
         ]
+        self.estimand_mapping = {
+            'mean':self.mean_estimator_names,
+            'var':self.var_estimator_names,
+            'corr':self.corr_estimator_names
+        }
+        self.mv_regressors = {}
         self.estimates = {}
         
     
@@ -156,15 +158,30 @@ class MementoRNA():
             return subset.X
         
     
-    def compute_estimate(self, estimator, gene_list=None, gene_pairs=None):
+    def compute_estimate(
+        self, 
+        estimand,
+        get_se=False,
+        gene_list=None, 
+        gene_pairs=None,
+        n_boot=5000,
+        n_jobs=1,
+        verbose=0):
         """
             Compute the estimand.
         """ 
         
-        if type(estimator) == str:
-            
-            estimator = [estimator]
+        # Make sure estimand is one of mean, var, corr
+        if estimand not in ['mean', 'var', 'corr']:
+            raise ValueError(f'estimand must be one of [mean, var, corr], given {estimand}')
+                
+        # Setup a dictionary to hold the estimates
+        estimator = self.estimand_mapping[estimand] + self.estimator_group_names
+        if get_se:
+            estimator += ['se_' + est for est in estimator]
         estimates = {est:OrderedDict() for est in estimator}
+        
+        logging.info(f'compute_estimate: running estimators for {estimator}')
         
         if gene_list is None:
             logging.info(f'compute_estimate: gene_list is None, using all genes in AnnData object...')
@@ -175,45 +192,84 @@ class MementoRNA():
             data = self.subset_matrix(barcodes, gene_list)
             sf = self.adata.obs.loc[barcodes]['memento_size_factor'].values
             q = self.adata.uns['memento']['group_q'][group]
-        
-            for est in estimator:
+            
+            # Compute global quantities
+            estimates['total_umi'][group] = data.sum()
+            estimates['cell_count'][group] = data.shape[0]
+            
+            # Compute estimand specific quantities
+            if estimand == 'mean':
 
-                if est not in self.estimator_names:
+                estimates['mean'][group] = hg_mean(X=data, size_factor=sf)
+                estimates['log_mean'][group] = np.log(estimates['mean'][group])
+                estimates['log1p_mean'][group] = np.log(estimates['mean'][group]+1)
 
-                    logging.error(f'compute_estimate: {est} estimator is not available')
-                    raise
+                if get_se:
+                    
+                    logging.info(f'compute_estimate: getting bootstrap mean SE for using {n_jobs} parallel jobs')
+                    gene_tasks = []
+                    for idx, gene in enumerate(gene_list):
 
-                if est == 'mean':
-                
-                    estimates[est][group] = hg_mean(X=data, size_factor=sf)
-                    
-                elif est == 'sem':
-                    
-                    estimates[est][group] = np.sqrt(sample_variance(X=data, size_factor=sf)/data.shape[0])
-                    
-                elif est == 'var':
-                    
-                    estimates[est][group] = hg_variance(X=data, q=q, size_factor=sf, group_name=group)
-                
-                elif est == 'sum':
-                    
-                    estimates[est][group] = data.sum(axis=0).A1
-                
-                elif est == 'total_umi':
-                    
-                    estimates[est][group] = data.sum()
-                
-                elif est == 'cell_count':
-                    
-                    estimates[est][group] = data.shape[0]
-                    
-                else:
-                    logging.warning(f'compute_estimate: {est} estimator not yet implemented!')
-                    raise NotImplementedError()
+                        gene_tasks.append(partial(
+                            hg_sem_for_gene,
+                            X=data[:, idx],
+                            q=q,
+                            approx_size_factor=sf,
+                            num_boot=n_boot,
+                            group_name=group,
+                        ))
+
+                    results = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in gene_tasks)
+                    sem, selm, sel1pm = zip(*results)
+                    estimates['se_mean'][group] = sem
+                    estimates['se_log_mean'][group] = selm
+                    estimates['se_log1p_mean'][group] = sel1pm
+
+            elif estimand == 'var':
+
+                v = hg_variance(X=data, q=q, size_factor=sf, group_name=group)
+                v[v<=0] = np.nan
+
+                # Fit mean-variance relationship
+                m = estimates['mean'][group]
+                self.mv_regressors[group] = fit_mv_regressor(m,v)
+                rv = residual_variance(m, v, regressor)
+
+                estimates['var'][group] = v
+                estimates['log_var'] = np.log(v)
+                estimates['resvar'][group] = rv
+                estimates['log_resvar'][group] = np.log(rv)
+
+                if get_se:
+
+                    gene_tasks = []
+                    for idx, gene in enumerate(gene_list):
+
+                        gene_tasks.append(partial(
+                            hg_sev_for_gene,
+                            X=data[:, idx],
+                            q=q,
+                            approx_size_factor=sf,
+                            mv_fit=self.mv_regressors[group],
+                            num_boot=n_boot,
+                            group_name=group,
+                        ))
+
+                    results = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in gene_tasks)
+                    sev, selv, serv, selrv = zip(*results)
+                    estimates['se_var'][group] = sev
+                    estimates['se_log_var'][group] = selv
+                    estimates['se_resvar'][group] = serv
+                    estimates['se_log_resvar'][group] = selrv
+
+            else:
+
+                raise NotImplementedError(f'compute_estimate: {est} estimator not yet implemented!')
                     
         for est,res in estimates.items():
             
-            if est in self.estimator_1d_names:
+            base_name = est.split('se_')[-1]
+            if base_name in self.mean_estimator_names + self.var_estimator_names:
                 
                 self.estimates[est] = pd.DataFrame(res, index=gene_list).T
                 
@@ -223,7 +279,7 @@ class MementoRNA():
                 
             else:
                 
-                logging.warning(f'compute_estimates: storage for {est} not yet implemented!')
+                logging.warning(f'compute_estimates: storage for {base_name} not yet implemented!')
     
 
     def differential_mean(
