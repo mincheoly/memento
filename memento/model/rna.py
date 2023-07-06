@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import logging
 import scipy.stats as stats
+import statsmodels.api as sm
 
 from collections import OrderedDict
 from joblib import Parallel, delayed
@@ -17,7 +18,8 @@ from memento.estimator.hypergeometric import (
     fit_mv_regressor
 )
 from memento.estimator.sample import sample_mean, sample_variance
-from memento.util import select_cells, fit_nb, lrt_nb, meta_wls
+from memento.util import bin_size_factor, select_cells, fit_nb, meta_wls, lrt_nb
+
 
 class MementoRNA():
     """
@@ -32,6 +34,7 @@ class MementoRNA():
         self.adata = adata
         self.layer = layer
         self.mean_estimator_names = [
+            'sum',
             'mean',
             'log_mean',
             'log1p_mean',
@@ -40,6 +43,7 @@ class MementoRNA():
             'var',
             'log_var',
             'resvar',
+            'log_resvar'
         ]
         self.corr_estimator_names = [
             'corr',
@@ -82,7 +86,8 @@ class MementoRNA():
         cls,
         adata: sc.AnnData,
         label_columns: list, 
-        label_delimiter: str = '^'
+        label_delimiter: str = '^',
+        **kwargs
     ):
         adata.obs['memento_group'] = 'memento_group' + label_delimiter
         for idx, col_name in enumerate(label_columns):
@@ -146,7 +151,9 @@ class MementoRNA():
             size_factor += np.quantile(size_factor, shrinkage)
         size_factor = size_factor / np.median(size_factor)
         # size_factor = size_factor * umi_depth
+        adata.uns['memento']['umi_depth'] = umi_depth
         adata.obs['memento_size_factor'] = size_factor
+        adata.obs['memento_approx_size_factor'] = bin_size_factor(size_factor, num_bins=num_bins)
     
     
     def subset_matrix(self, barcodes, genes):
@@ -176,21 +183,26 @@ class MementoRNA():
             raise ValueError(f'estimand must be one of [mean, var, corr], given {estimand}')
                 
         # Setup a dictionary to hold the estimates
-        estimator = self.estimand_mapping[estimand] + self.estimator_group_names
+        estimator = self.estimand_mapping[estimand].copy()
         if get_se:
             estimator += ['se_' + est for est in estimator]
+        estimator += self.estimator_group_names
         estimates = {est:OrderedDict() for est in estimator}
         
         logging.info(f'compute_estimate: running estimators for {estimator}')
         
+        # Construct gene list if not given
         if gene_list is None:
-            logging.info(f'compute_estimate: gene_list is None, using all genes in AnnData object...')
+            logging.info(f'compute_estimate: gene_list is None, using all genes in AnnData object')
             gene_list = self.adata.var.index.tolist()
         
         for group, barcodes in self.adata.uns['memento']['group_barcodes'].items():
             
-            data = self.subset_matrix(barcodes, gene_list)
+            logging.info(f'compute_estimate: getting estimates for {group} using {n_jobs} parallel jobs')
+
+            data = self.subset_matrix(barcodes, gene_list).tocsc() #CSC format is faster
             sf = self.adata.obs.loc[barcodes]['memento_size_factor'].values
+            approx_sf = self.adata.obs.loc[barcodes]['memento_approx_size_factor'].values
             q = self.adata.uns['memento']['group_q'][group]
             
             # Compute global quantities
@@ -201,12 +213,12 @@ class MementoRNA():
             if estimand == 'mean':
 
                 estimates['mean'][group] = hg_mean(X=data, size_factor=sf)
+                estimates['sum'][group] = data.sum(axis=0).A1
                 estimates['log_mean'][group] = np.log(estimates['mean'][group])
                 estimates['log1p_mean'][group] = np.log(estimates['mean'][group]+1)
 
                 if get_se:
                     
-                    logging.info(f'compute_estimate: getting bootstrap mean SE for using {n_jobs} parallel jobs')
                     gene_tasks = []
                     for idx, gene in enumerate(gene_list):
 
@@ -214,29 +226,30 @@ class MementoRNA():
                             hg_sem_for_gene,
                             X=data[:, idx],
                             q=q,
-                            approx_size_factor=sf,
+                            approx_size_factor=approx_sf,
                             num_boot=n_boot,
                             group_name=group,
                         ))
 
                     results = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in gene_tasks)
-                    sem, selm, sel1pm = zip(*results)
+                    sem, ses, selm, sel1pm = zip(*results)
                     estimates['se_mean'][group] = sem
+                    estimates['se_sum'][group] = ses
                     estimates['se_log_mean'][group] = selm
                     estimates['se_log1p_mean'][group] = sel1pm
 
             elif estimand == 'var':
-
+                
                 v = hg_variance(X=data, q=q, size_factor=sf, group_name=group)
                 v[v<=0] = np.nan
 
                 # Fit mean-variance relationship
-                m = estimates['mean'][group]
+                m = hg_mean(X=data, size_factor=sf)
                 self.mv_regressors[group] = fit_mv_regressor(m,v)
-                rv = residual_variance(m, v, regressor)
+                rv = residual_variance(m, v, self.mv_regressors[group])
 
                 estimates['var'][group] = v
-                estimates['log_var'] = np.log(v)
+                estimates['log_var'][group] = np.log(v)
                 estimates['resvar'][group] = rv
                 estimates['log_resvar'][group] = np.log(rv)
 
@@ -249,13 +262,14 @@ class MementoRNA():
                             hg_sev_for_gene,
                             X=data[:, idx],
                             q=q,
-                            approx_size_factor=sf,
+                            approx_size_factor=approx_sf,
                             mv_fit=self.mv_regressors[group],
                             num_boot=n_boot,
                             group_name=group,
                         ))
 
                     results = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in gene_tasks)
+                    
                     sev, selv, serv, selrv = zip(*results)
                     estimates['se_var'][group] = sev
                     estimates['se_log_var'][group] = selv
@@ -273,7 +287,7 @@ class MementoRNA():
                 
                 self.estimates[est] = pd.DataFrame(res, index=gene_list).T
                 
-            elif est in self.estimator_group_names:
+            elif base_name in self.estimator_group_names:
                 
                 self.estimates[est] = pd.DataFrame(res, index=[est]).T
                 
@@ -286,6 +300,7 @@ class MementoRNA():
         self, 
         covariates: pd.DataFrame,
         treatments: pd.DataFrame,
+        estimator='mean',
         treatment_for_gene: dict = None,
         family: str = 'NB',
         n_jobs=1,
@@ -298,14 +313,11 @@ class MementoRNA():
 
         if family == 'NB':
             # Transform mean estimate to "pseudobulk"
-            expr = test_estimates['mean']*test_estimates['total_umi'].values
-            expr_se = test_estimates['sem']*test_estimates['cell_count'].values**2
-
-            # Transform standard error to weights
-            weights = np.sqrt(1/expr_se).replace([-np.inf, np.inf], np.nan)
-            mean_weight = np.nanmean(weights)
-            weights /= mean_weight
-            weights = weights.fillna(1.0)            
+            
+            expr = (
+                test_estimates['mean']/
+                self.adata.uns['memento']['umi_depth']*
+                test_estimates['total_umi'].values)        
 
             # Construct the tests
             tests = []  
@@ -328,9 +340,7 @@ class MementoRNA():
                             lrt_nb,
                             endog=expr.iloc[:, [idx]], 
                             exog=design_matrix,
-                            exog0=covariates, 
                             offset=np.log(test_estimates['total_umi']['total_umi'].values), 
-                            weights=weights.iloc[:, idx], 
                             gene=gene, 
                             t=t))
                     
@@ -340,13 +350,8 @@ class MementoRNA():
     
         if family == 'WLS':
 
-            test_estimates['log1p_mean'] = np.log(test_estimates['mean']+1)
-            l = np.log((test_estimates['mean']+1) - test_estimates['sem'])
-            u = np.log((test_estimates['mean']+1) + test_estimates['sem'])
-            test_estimates['log1p_sem'] = (u-l)/2
-
-            expr = test_estimates['log1p_mean']
-            expr_sem = test_estimates['log1p_sem']
+            expr = test_estimates[estimator]
+            expr_sem = test_estimates['se_' + estimator]
             min_sem = expr_sem[expr_sem > 0].min(axis=0)
             for col in expr_sem.columns:
                 expr_sem[col] = expr_sem[col].replace(0.0, min_sem[col])
@@ -378,7 +383,7 @@ class MementoRNA():
                     
             # Compute the tests in parallel
             result = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in tests)
-            return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'pval']).set_index('gene')
+            return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'se','pval']).set_index('gene')
             
 
             

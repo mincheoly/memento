@@ -104,10 +104,11 @@ def hg_sem_for_gene(
         return mean
 
     sem = np.nanstd(mean)
+    ses = np.nanstd(mean*((gene_rvs/inv_sf).sum(axis=0)+1))
     selm = np.nanstd(np.log(mean))
     sel1pm = np.nanstd(np.log(mean+1))
     
-    return sem, selm, sel1pm
+    return sem, ses, selm, sel1pm
 
 
 def hg_variance(X: sparse.csc_matrix, q: float, size_factor: np.array, group_name=None):
@@ -156,8 +157,8 @@ def hg_sev_for_gene(
 ):
     """ Compute the standard error of the variance for a SINGLE gene. """
     
-    if X.max() < 2:
-        return np.nan, np.nan
+    if X.max() < 2 and not return_boot_samples:
+        return np.nan, np.nan, np.nan, np.nan
     
     n_obs = X.shape[0]
     inv_sf, inv_sf_sq, expr, counts = unique_expr(X, approx_size_factor)
@@ -174,11 +175,11 @@ def hg_sev_for_gene(
         inverse_size_factor_sq=inv_sf_sq
     )
 
-    mean, var = fill_invalid(var, group_name)
+    var = fill_invalid(var, group_name)
     res_var = residual_variance(mean, var, mv_fit)
     
     if return_boot_samples:
-        return var
+        return var, res_var
 
     sev = np.nanstd(var)
     selv = np.nanstd(np.log(var))
