@@ -84,39 +84,49 @@ def fit_nb(endog, exog, offset, alpha=None, weights=None):
     return alpha, nb
 
 
-def lrt_nb(endog, exog, exog0, offset, weights=None, gene=None, t=None):
+def lrt_nb(endog, exog, exog0, offset, weights=None, dispersion=None, gene=None, t=None):
     """
         Perform a likelihood ratio test using NB GLM.
     """
     
-    nb_model = sm.NegativeBinomial(
-        endog=endog,
-        exog=exog, 
-        offset=offset,
-        weights=weights).fit()
-    
-    return (gene, t, nb_model.params[-1], nb_model.pvalues[-1])
-
-#     try:
-#         alpha, fit = fit_nb(
-#             endog=endog,
-#             exog=exog, 
-#             offset=offset,
-#             weights=weights)
-#         _, res_fit = fit_nb(
-#             endog=endog,
-#             exog=exog0, 
-#             offset=offset,
-#             weights=weights,
-#             alpha=alpha)
-#     except:
-#         return((gene, t, 0, 1))
-
-#     pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
-#     return((gene, t, fit.params[-1], pv))
+    if dispersion is None:
+        try:
+            alpha, fit = fit_nb(
+                endog=endog,
+                exog=exog, 
+                offset=offset,
+                weights=weights)
+            _, res_fit = fit_nb(
+                endog=endog,
+                exog=exog0, 
+                offset=offset,
+                weights=weights,
+                alpha=alpha)
+        except:
+            return((gene, t, 0, 1))
+    else:
+        try:
+            _, fit = fit_nb(
+                endog=endog,
+                exog=exog, 
+                offset=offset,
+                weights=weights,
+                alpha=dispersion)
+            _, res_fit = fit_nb(
+                endog=endog,
+                exog=exog0, 
+                offset=offset,
+                weights=weights,
+                alpha=dispersion)
+        except:
+            return((gene, t, 0, 1))
+            
+    pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
+    return((gene, t, fit.params[-1], pv))
 
 
 def meta_wls(y, X, v, gene=None, t=None):
+    
     try:
         dsl = estimators.WeightedLeastSquares()
         dsl.fit(y=y, X=X, v=v)

@@ -302,7 +302,7 @@ class MementoRNA():
         treatments: pd.DataFrame,
         estimator='mean',
         treatment_for_gene: dict = None,
-        family: str = 'NB',
+        family: str = 'WGLM',
         dispersions: np.array = None,
         n_jobs=1,
         verbose=0):
@@ -312,134 +312,23 @@ class MementoRNA():
         groups_in_test = covariates.index.tolist()
         test_estimates = {est:res.loc[groups_in_test] for est,res in self.estimates.items()}
         
-        if family == 'glm':
+        if family == 'WGLM':
             
             expr = (
                 test_estimates['mean']/
                 self.adata.uns['memento']['umi_depth']*
-                test_estimates['total_umi'].values)    
-
-            def quasi_model(endog, exog, offset, gene, t, disp):
-                
-                # Get coef via NB
-                model = sm.GLM(
-                    endog=endog, 
-                    exog=exog, 
-                    offset=offset, 
-                    family=sm.families.NegativeBinomial(alpha=disp)).fit()
-                    
-                coef = model.params[t]
-                pred = model.predict()
-                var = pred+disp*pred**2
-                X = exog.values
-                W = np.diag(pred**2/(var ))
-                cov = np.diag(np.linalg.pinv(X.T@W@X))
-                se = np.sqrt(cov)[-1]
-                p = 2*stats.norm.sf(np.abs(coef)/se)
-                return gene, t, coef, se, p
-
-            tests = []  
-            for idx, gene in enumerate(expr.columns):
-                
-                if treatment_for_gene is not None:
-                    if gene in treatment_for_gene: # Get treatments for this gene
-                        treatment_list = treatment_for_gene[gene]
-                    else: # Pass this gene
-                        continue
-                else: # Default, get all pairwise treatment-gene tests
-                    treatment_list = treatments.columns
-                    
-                for t in treatment_list:
-                    
-                    design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
-                    
-                    tests.append(
-                        partial(
-                            quasi_model,
-                            endog=expr.iloc[:, [idx]], 
-                            exog=design_matrix,
-                            offset=np.log(test_estimates['total_umi']['total_umi'].values), 
-                            gene=gene, 
-                            t=t,
-                            disp=dispersions[idx]))
-                    
-            # Compute the tests in parallel
-            result = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in tests)
-            return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'se','pval']).set_index('gene')
-        
-        
-        if family == 'custom':
-            
-            expr = (
-                test_estimates['mean']/
+                test_estimates['total_umi'].values)
+            expr_se = (
+                test_estimates['se_mean']/
                 self.adata.uns['memento']['umi_depth']*
-                test_estimates['total_umi'].values)    
-            v = (self.estimates['se_mean']**2)
-            umi = self.adata.uns['memento']['umi_depth']
-            total = self.estimates['total_umi'].values
+                test_estimates['cell_count'].values)**2
+
+            # Transform standard error to weights
+            weights = np.sqrt(1/expr_se).replace([-np.inf, np.inf], np.nan)
+            mean_weight = np.nanmean(weights)
+            weights /= mean_weight
+            weights = weights.fillna(1.0) 
             
-            var_expr = v*total**2/umi**2
-
-            
-            def quasi_model(endog, exog, offset, var_endog, gene, t, disp):
-                
-                # Get coef via NB
-                model = sm.GLM(
-                    endog=endog, 
-                    exog=exog, 
-                    offset=offset, 
-                    family=sm.families.NegativeBinomial(alpha=disp)).fit()
-                    
-                coef = model.params[t]
-                pred = model.predict()
-                var = pred+disp*pred**2+var_endog
-                X = exog.values
-                W = np.diag(pred**2/(var ))
-                cov = np.diag(np.linalg.pinv(X.T@W@X))
-                se = np.sqrt(cov)[-1]
-                p = 2*stats.norm.sf(np.abs(coef)/se)
-                return gene, t, coef, se, p
-
-            tests = []  
-            for idx, gene in enumerate(expr.columns):
-                
-                if treatment_for_gene is not None:
-                    if gene in treatment_for_gene: # Get treatments for this gene
-                        treatment_list = treatment_for_gene[gene]
-                    else: # Pass this gene
-                        continue
-                else: # Default, get all pairwise treatment-gene tests
-                    treatment_list = treatments.columns
-                    
-                for t in treatment_list:
-                    
-                    design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
-                    
-                    tests.append(
-                        partial(
-                            quasi_model,
-                            endog=expr.iloc[:, [idx]], 
-                            exog=design_matrix,
-                            offset=np.log(test_estimates['total_umi']['total_umi'].values), 
-                            var_endog=var_expr.iloc[:, idx],
-                            gene=gene, 
-                            t=t,
-                            disp=dispersions[idx]))
-                    
-            # Compute the tests in parallel
-            result = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in tests)
-            return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'se','pval']).set_index('gene')
-
-        
-        if family == 'NB':
-            # Transform mean estimate to "pseudobulk"
-            
-            expr = (
-                test_estimates['mean']/
-                self.adata.uns['memento']['umi_depth']*
-                test_estimates['total_umi'].values)        
-
-            # Construct the tests
             tests = []  
             for idx, gene in enumerate(expr.columns):
                 
@@ -460,7 +349,10 @@ class MementoRNA():
                             lrt_nb,
                             endog=expr.iloc[:, [idx]], 
                             exog=design_matrix,
+                            exog0=covariates, 
                             offset=np.log(test_estimates['total_umi']['total_umi'].values), 
+                            weights=weights.iloc[:, idx], 
+                            dispersion=dispersions[idx],
                             gene=gene, 
                             t=t))
                     
