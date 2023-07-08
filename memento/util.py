@@ -121,7 +121,8 @@ def lrt_nb(endog, exog, exog0, offset, weights=None, dispersion=None, gene=None,
         except:
             return((gene, t, 0, 1))
             
-    pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
+    # pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
+    pv = 0.5#fit.pvalues[t]
     return((gene, t, fit.params[-1], pv))
 
 
