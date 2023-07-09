@@ -6,6 +6,7 @@ import scipy as sp
 import statsmodels.api as sm
 from statsmodels.stats.multitest import fdrcorrection
 from pymare import estimators
+from scipy.optimize import minimize_scalar
 
 
 
@@ -142,3 +143,102 @@ def meta_wls(y, X, v, gene=None, t=None):
         return((gene, t, 0, 0, 1))
     
     return ((gene, t, coef, se, p))
+
+
+def nb_var_func(x, alpha):
+
+    return (x+alpha*x**2)
+
+
+def dispersion_objective(alpha, m, v, multiplier):
+
+    return ((np.log(v*multiplier) - np.log(nb_var_func(m, alpha)))**2).mean()
+
+
+def get_nb_sample_dispersions(expr, expr_var):
+    
+    num_groups = expr.shape[0]
+    sample_dispersions = np.zeros(num_groups)
+
+    for i in range(num_groups):
+
+        m = expr[i]
+        v = expr_var[i]
+
+        lowexpr = m[m < np.quantile(m, 0.3)]
+        lowexpr_var = v[m < np.quantile(m, 0.3)]
+        multiplier = np.median((lowexpr/lowexpr_var)) # intercept on log-log plot to match Poisson assumption
+
+        sample_dispersions[i] = minimize_scalar(
+            lambda x: dispersion_objective(x, m=m, v=v, multiplier=multiplier), 
+            bounds=[0, 10]).x
+    
+    return sample_dispersions
+
+
+def wald_nb(
+    endog, 
+    exog, 
+    offset,
+    weights=None, 
+    sample_dispersion=None,
+    gene_dispersion=None,
+    gene=None, 
+    t=None):
+    """
+        Perform a Wald ratio test using NB GLM.
+    """
+    
+    try:
+        fit = sm.GLM(
+            endog, 
+            exog, 
+            offset=offset,
+            family=sm.families.Poisson()).fit()
+    except:
+        return((gene, t, 0, 1))
+            
+    # pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
+    pv = fit.pvalues[t]
+    X = exog.values
+    pred = fit.predict()
+    W = (pred**2 / (   gene_dispersion*(pred + sample_dispersion*pred**2)   ))
+    se = np.sqrt(np.diag(np.linalg.pinv(X.T@np.diag(W)@X)))[-1]
+    coef = fit.params[t]
+    pv = 2*stats.norm.sf(np.abs(coef/se))
+    # pv = 0.5
+    return((gene, t, coef, pv))
+
+
+def wald_quasi(
+    endog, 
+    exog, 
+    offset,
+    weights=None, 
+    sample_dispersion=None,
+    gene_dispersion=None,
+    gene=None, 
+    t=None):
+    """
+        Perform a Wald ratio test using NB GLM.
+    """
+    
+    try:
+        fit = sm.GLM(
+            endog, 
+            exog, 
+            offset=offset,
+            family=sm.families.Poisson()).fit()
+    except:
+        return((gene, t, 0, 1))
+            
+    # pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
+    pv = fit.pvalues[t]
+    X = exog.values
+    pred = fit.predict()
+    W = (pred**2 / (   gene_dispersion*(pred + sample_dispersion*pred**2)   ))
+    se = np.sqrt(np.diag(np.linalg.pinv(X.T@np.diag(W)@X)))[-1]
+    coef = fit.params[t]
+    pv = 2*stats.norm.sf(np.abs(coef/se))
+    # pv = 0.5
+    return((gene, t, coef, pv))

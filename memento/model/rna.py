@@ -18,57 +18,14 @@ from memento.estimator.hypergeometric import (
     fit_mv_regressor
 )
 from memento.estimator.sample import sample_mean, sample_variance
-from memento.util import bin_size_factor, select_cells, fit_nb, meta_wls
+from memento.util import (
+    bin_size_factor, 
+    select_cells, 
+    meta_wls, 
+    get_nb_sample_dispersions,
+    wald_nb)
 
 from .base import MementoBase
-
-def lrt_nb(endog, exog, exog0, offset, weights=None, dispersion=None, gene=None, t=None):
-    """
-        Perform a likelihood ratio test using NB GLM.
-    """
-    
-    if dispersion is None:
-        try:
-            alpha, fit = fit_nb(
-                endog=endog,
-                exog=exog, 
-                offset=offset,
-                weights=weights)
-            _, res_fit = fit_nb(
-                endog=endog,
-                exog=exog0, 
-                offset=offset,
-                weights=weights,
-                alpha=alpha)
-        except:
-            return((gene, t, 0, 1))
-    else:
-        try:
-            _, fit = fit_nb(
-                endog=endog,
-                exog=exog, 
-                offset=offset,
-                # weights=weights,
-                alpha=dispersion)
-            _, res_fit = fit_nb(
-                endog=endog,
-                exog=exog0, 
-                offset=offset,
-                weights=weights,
-                alpha=dispersion)
-        except:
-            return((gene, t, 0, 1))
-            
-    # pv = stats.chi2.sf(-2*(res_fit.llf - fit.llf), df=res_fit.df_resid-fit.df_resid)
-    pv = fit.pvalues[t]
-    X = exog.values
-    pred = fit.predict()
-    W = (pred**2 / (pred + dispersion*pred**2))*weights
-    se = np.sqrt(np.diag(np.linalg.pinv(X.T@np.diag(W)@X)))[-1]
-    coef = fit.params[t]
-    pv = 2*stats.norm.sf(coef/se)
-    # pv = 0.5
-    return((gene, t, coef, pv))
 
 
 class MementoRNA(MementoBase):
@@ -361,23 +318,21 @@ class MementoRNA(MementoBase):
         # Index the estimates by the groups actually present
         groups_in_test = covariates.index.tolist()
         test_estimates = {est:res.loc[groups_in_test] for est,res in self.estimates.items()}
+        dispersions = np.array(dispersions)
+        norm_dispersions = dispersions/dispersions.mean()
         
         if family == 'WGLM':
             
+            # "Counts" to use in GLM
             expr = (
                 test_estimates['mean']/
                 self.adata.uns['memento']['umi_depth']*
                 test_estimates['total_umi'].values)
-            expr_se = (
-                test_estimates['se_mean']/
-                test_estimates['cell_count'].values)**2
-
-            # Transform standard error to weights
-            weights = np.sqrt(1/expr_se).replace([-np.inf, np.inf], np.nan)
-            weights /= weights.values.mean()
-            weights = weights.fillna(1.0) 
             
-            genewise_weights = weights.mean(axis=0).values
+            # Moments to estimate sample-wise dispersion
+            mean = test_estimates['mean'].values
+            sampling_variance = test_estimates['se_mean'].values**2
+            sample_dispersions = get_nb_sample_dispersions(mean, sampling_variance)
             
             tests = []  
             for idx, gene in enumerate(expr.columns):
@@ -393,18 +348,26 @@ class MementoRNA(MementoBase):
                 for t in treatment_list:
                     
                     design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
-                    
                     tests.append(
                         partial(
-                            lrt_nb,
-                            endog=expr.iloc[:, [idx]], 
+                            wald_quasi,
+                            endog=expr.iloc[:, idx].values, 
                             exog=design_matrix,
-                            exog0=covariates, 
                             offset=np.log(test_estimates['total_umi']['total_umi'].values), 
-                            weights=weights.iloc[:, idx].values, 
-                            dispersion=dispersions[idx],
+                            var_func=mv_func,
                             gene=gene, 
                             t=t))
+                    
+                    # tests.append(
+                    #     partial(
+                    #         wald_nb,
+                    #         endog=expr.iloc[:, idx].values, 
+                    #         exog=design_matrix,
+                    #         offset=np.log(test_estimates['total_umi']['total_umi'].values), 
+                    #         sample_dispersion=sample_dispersions,
+                    #         gene_dispersion=norm_dispersions[idx],
+                    #         gene=gene, 
+                    #         t=t))
                     
             # Compute the tests in parallel
             result = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in tests)
