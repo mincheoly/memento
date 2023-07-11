@@ -8,6 +8,7 @@ import statsmodels.api as sm
 from collections import OrderedDict
 from joblib import Parallel, delayed
 from functools import partial
+from sklearn.linear_model import LinearRegression
 
 from memento.estimator.hypergeometric import (
     hg_mean, 
@@ -23,7 +24,10 @@ from memento.util import (
     select_cells, 
     meta_wls, 
     get_nb_sample_dispersions,
-    wald_nb)
+    wald_nb,
+    fit_loglinear,
+    fit_quasi_nb,
+    quasi_nb_var)
 
 from .base import MementoBase
 
@@ -309,7 +313,7 @@ class MementoRNA(MementoBase):
         treatments: pd.DataFrame,
         estimator='mean',
         treatment_for_gene: dict = None,
-        family: str = 'WGLM',
+        family: str = 'quasiGLM',
         dispersions: np.array = None,
         n_jobs=1,
         verbose=0):
@@ -318,11 +322,101 @@ class MementoRNA(MementoBase):
         # Index the estimates by the groups actually present
         groups_in_test = covariates.index.tolist()
         test_estimates = {est:res.loc[groups_in_test] for est,res in self.estimates.items()}
-        dispersions = np.array(dispersions)
         norm_dispersions = dispersions/dispersions.mean()
         
-        if family == 'WGLM':
+        if family == 'quasiGLM':
             
+            n_groups = test_estimates['mean'].shape[0]
+            
+            # "Counts" to use in GLM
+            expr = (
+                test_estimates['mean']/
+                self.adata.uns['memento']['umi_depth']*
+                test_estimates['total_umi'].values)
+            count_multiplier = self.estimates['total_umi'].values/self.adata.uns['memento']['umi_depth']
+            sampling_variance =  (self.estimates['se_mean']**2)*count_multiplier**2
+            
+            # Fit within-sample variance function parameters
+            intra_var_scale = np.zeros(n_groups)
+            intra_var_dispersion = np.zeros(n_groups)
+            for group_idx in range(n_groups):
+                intra_var_scale[group_idx], intra_var_dispersion[group_idx] = fit_quasi_nb(    
+                    mean = expr.iloc[group_idx].values,
+                    variance = sampling_variance.iloc[group_idx].values)
+                
+            # Fit loglinear models
+            regressions = []
+            for idx, gene in enumerate(expr.columns):
+                
+                if treatment_for_gene is not None:
+                    if gene in treatment_for_gene: # Get treatments for this gene
+                        treatment_list = treatment_for_gene[gene]
+                    else: # Pass this gene
+                        continue
+                else: # Default, get all pairwise treatment-gene tests
+                    treatment_list = treatments.columns
+                    
+                for t in treatment_list:
+                    
+                    design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
+
+                    regressions.append(
+                        partial(
+                            fit_loglinear,
+                            endog=expr.iloc[:, idx].values, 
+                            exog=design_matrix,
+                            offset=np.log(test_estimates['total_umi']['total_umi'].values), 
+                            gene=gene, 
+                            t=t))
+            regression_fits = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in regressions)
+            
+            # Fit between-sample variance function parameters
+            pred = np.array([fit['pred'] for fit in regression_fits]).T
+            endog = np.array([fit['endog'] for fit in regression_fits]).T
+            resid_variance = ((pred-endog)**2)
+            
+            # Fit within-sample variance function parameters
+            var_power = np.zeros(n_groups)
+            var_factor = np.zeros(n_groups)
+            for group_idx in range(n_groups):
+                
+                x,y = np.log(pred[group_idx]), np.log(resid_variance[group_idx])
+                x_high = x[x > np.quantile(x, 0.9)]
+                y_high = y[x > np.quantile(x, 0.9)]
+                var_power[group_idx], var_factor[group_idx], _, _, _ = stats.linregress(x_high, y_high)
+
+            correction = var_power-var_power.min()
+            
+            # Fit global dispersion
+            point_dispersion = (resid_variance-pred)/pred**2
+            point_dispersion[point_dispersion < 0] = np.nan
+            point_dispersion[point_dispersion > 5] = np.nan
+            global_dispersion = np.nanmean(point_dispersion)
+            point_dispersion[~np.isfinite(point_dispersion)] = global_dispersion
+            genewise_dispersion = np.nanmean(point_dispersion, axis=0)
+            genewise_dispersion = pd.Series( (genewise_dispersion-global_dispersion)/2+global_dispersion, index=self.adata.var.index.tolist())
+                        
+            # Compute coef, se and pval for fits
+            result = []
+            for fit in regression_fits:
+                coef = fit['model'].params[t]
+                X = fit['design'].values
+                pred = fit['pred']
+                endog = fit['endog']
+                
+                intra_var = quasi_nb_var(pred, intra_var_scale, intra_var_dispersion)
+                inter_var = genewise_dispersion[fit['gene']]*pred**(2+correction)
+                total_var = intra_var + inter_var
+                
+                W = (pred**2) / total_var
+                se = np.sqrt(np.diag(np.linalg.pinv(X.T@np.diag(W)@X)))[-1]
+                pv = 2*stats.norm.sf(np.abs(coef/se))
+                
+                result.append((fit['gene'], fit['t'], coef, se, pv))
+            return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'se','pval']).set_index('gene')
+            
+
+        if family == 'WGLM':
             # "Counts" to use in GLM
             expr = (
                 test_estimates['mean']/
@@ -348,26 +442,17 @@ class MementoRNA(MementoBase):
                 for t in treatment_list:
                     
                     design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
+
                     tests.append(
                         partial(
-                            wald_quasi,
+                            wald_nb,
                             endog=expr.iloc[:, idx].values, 
                             exog=design_matrix,
                             offset=np.log(test_estimates['total_umi']['total_umi'].values), 
-                            var_func=mv_func,
+                            sample_dispersion=sample_dispersions,
+                            gene_dispersion=norm_dispersions[idx],
                             gene=gene, 
                             t=t))
-                    
-                    # tests.append(
-                    #     partial(
-                    #         wald_nb,
-                    #         endog=expr.iloc[:, idx].values, 
-                    #         exog=design_matrix,
-                    #         offset=np.log(test_estimates['total_umi']['total_umi'].values), 
-                    #         sample_dispersion=sample_dispersions,
-                    #         gene_dispersion=norm_dispersions[idx],
-                    #         gene=gene, 
-                    #         t=t))
                     
             # Compute the tests in parallel
             result = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in tests)
@@ -409,18 +494,3 @@ class MementoRNA(MementoBase):
             # Compute the tests in parallel
             result = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in tests)
             return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'se','pval']).set_index('gene')
-            
-
-            
-            
-            
-            
-            
-            
-            
-            
-                    
-                    
-                
-                
-        

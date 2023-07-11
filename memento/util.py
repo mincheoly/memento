@@ -6,7 +6,7 @@ import scipy as sp
 import statsmodels.api as sm
 from statsmodels.stats.multitest import fdrcorrection
 from pymare import estimators
-from scipy.optimize import minimize_scalar
+from scipy.optimize import minimize_scalar, minimize
 
 
 
@@ -202,7 +202,7 @@ def wald_nb(
     pv = fit.pvalues[t]
     X = exog.values
     pred = fit.predict()
-    W = (pred**2 / (   gene_dispersion*(pred + sample_dispersion*pred**2)   ))
+    W = (pred**2 / (   gene_dispersion*(pred + .005749975880258846*pred**2)   ))
     se = np.sqrt(np.diag(np.linalg.pinv(X.T@np.diag(W)@X)))[-1]
     coef = fit.params[t]
     pv = 2*stats.norm.sf(np.abs(coef/se))
@@ -215,8 +215,7 @@ def wald_quasi(
     exog, 
     offset,
     weights=None, 
-    sample_dispersion=None,
-    gene_dispersion=None,
+
     gene=None, 
     t=None):
     """
@@ -242,3 +241,50 @@ def wald_quasi(
     pv = 2*stats.norm.sf(np.abs(coef/se))
     # pv = 0.5
     return((gene, t, coef, pv))
+
+
+def fit_loglinear(endog, exog, offset, gene, t):
+    """
+        Fit a loglinear model and return the predicted means and model
+    """
+    fit = sm.GLM(
+        endog, 
+        exog, 
+        offset=offset,
+        family=sm.families.Poisson()).fit()
+    
+    return {
+        'gene':gene, 
+        't':t,
+        'design':exog,
+        'pred':fit.predict(),
+        'endog':endog,
+        'model':fit}
+    
+    
+def quasi_nb_var(mean, scale, dispersion):
+    
+    return scale*(mean + dispersion*mean**2)
+
+
+def quasi_nb_objective(scale, dispersion, mean, variance):
+    
+    pred_y = np.log(quasi_nb_var(mean, scale, dispersion))
+    y = np.log(variance)
+    
+    return ((pred_y-y)**2).mean()
+    
+
+def fit_quasi_nb(mean, variance):
+
+    dispersion0 = 1
+    scale0 = np.median((mean/variance))
+        
+    optim_obj = lambda params: quasi_nb_objective(params[0], params[1], mean, variance)
+
+    res =  minimize(
+        optim_obj, 
+        [scale0, dispersion0],
+        bounds=[(1e-5,None), (1e-10, 10)],
+    )
+    return res.x
