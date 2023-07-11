@@ -230,24 +230,14 @@ class MementoRNA(MementoBase):
 
                 if get_se:
                     
-                    gene_tasks = []
-                    for idx, gene in enumerate(gene_list):
-
-                        gene_tasks.append(partial(
-                            hg_sem_for_gene,
-                            X=data[:, idx],
-                            q=q,
-                            approx_size_factor=approx_sf,
-                            num_boot=n_boot,
-                            group_name=group,
-                        ))
-
-                    results = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in gene_tasks)
-                    sem, ses, selm, sel1pm = zip(*results)
-                    estimates['se_mean'][group] = sem
-                    estimates['se_sum'][group] = ses
-                    estimates['se_log_mean'][group] = selm
-                    estimates['se_log1p_mean'][group] = sel1pm
+                    estimates['se_mean'][group] = np.sqrt(sample_variance(X=data, size_factor=sf)/data.shape[0])
+                    estimates['se_sum'][group] = np.sqrt(sample_variance(X=data, size_factor=np.ones(data.shape[0]))*data.shape[0])
+                    estimates['se_log_mean'][group] = (
+                        np.log(estimates['mean'][group]+ estimates['se_mean'][group]) - 
+                        np.log(estimates['mean'][group]- estimates['se_mean'][group]))/2
+                    estimates['se_log1p_mean'][group] = (
+                        np.log(estimates['mean'][group]+ estimates['se_mean'][group]+1) - 
+                        np.log(estimates['mean'][group]- estimates['se_mean'][group]+1))/2
 
             elif estimand == 'var':
                 
@@ -322,8 +312,7 @@ class MementoRNA(MementoBase):
         # Index the estimates by the groups actually present
         groups_in_test = covariates.index.tolist()
         test_estimates = {est:res.loc[groups_in_test] for est,res in self.estimates.items()}
-        norm_dispersions = dispersions/dispersions.mean()
-        
+                
         if family == 'quasiGLM':
             
             n_groups = test_estimates['mean'].shape[0]
@@ -427,6 +416,8 @@ class MementoRNA(MementoBase):
             mean = test_estimates['mean'].values
             sampling_variance = test_estimates['se_mean'].values**2
             sample_dispersions = get_nb_sample_dispersions(mean, sampling_variance)
+            norm_dispersions = dispersions/dispersions.mean()
+
             
             tests = []  
             for idx, gene in enumerate(expr.columns):
