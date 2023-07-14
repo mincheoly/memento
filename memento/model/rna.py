@@ -232,9 +232,13 @@ class MementoRNA(MementoBase):
                     
                     estimates['se_mean'][group] = np.sqrt(sample_variance(X=data, size_factor=sf)/data.shape[0])
                     estimates['se_sum'][group] = np.sqrt(sample_variance(X=data, size_factor=np.ones(data.shape[0]))*data.shape[0])
-                    estimates['se_log_mean'][group] = (
-                        np.log(estimates['mean'][group]+ estimates['se_mean'][group]) - 
-                        np.log(estimates['mean'][group]- estimates['se_mean'][group]))/2
+                    valid_idx = estimates['mean'][group] > estimates['se_mean'][group]
+                    se_log_mean_full = (
+                        np.log(estimates['mean'][group][valid_idx]+ estimates['se_mean'][group][valid_idx]) - 
+                        np.log(estimates['mean'][group][valid_idx]- estimates['se_mean'][group][valid_idx]))/2
+                    se_log_mean = np.log(estimates['mean'][group]+ estimates['se_mean'][group])-estimates['log_mean'][group]
+                    se_log_mean[valid_idx] = se_log_mean_full
+                    estimates['se_log_mean'][group] = se_log_mean
                     estimates['se_log1p_mean'][group] = (
                         np.log(estimates['mean'][group]+ estimates['se_mean'][group]+1) - 
                         np.log(estimates['mean'][group]- estimates['se_mean'][group]+1))/2
@@ -364,26 +368,29 @@ class MementoRNA(MementoBase):
             endog = np.array([fit['endog'] for fit in regression_fits]).T
             resid_variance = ((pred-endog)**2)
             
+            
+            
             # Fit within-sample variance function parameters
             var_power = np.zeros(n_groups)
             var_factor = np.zeros(n_groups)
             for group_idx in range(n_groups):
                 
                 x,y = np.log(pred[group_idx]), np.log(resid_variance[group_idx])
-                x_high = x[x > np.quantile(x, 0.9)]
-                y_high = y[x > np.quantile(x, 0.9)]
+                filtered_idx = (x > np.quantile(x, 0.9)) & np.isfinite(x) & np.isfinite(y)
+                x_high = x[filtered_idx]
+                y_high = y[filtered_idx]
                 var_power[group_idx], var_factor[group_idx], _, _, _ = stats.linregress(x_high, y_high)
 
-            correction = var_power-var_power.min()
+#             correction = var_power-var_power.min()
             
-            # Fit global dispersion
-            point_dispersion = (resid_variance-pred)/pred**2
-            point_dispersion[point_dispersion < 0] = np.nan
-            point_dispersion[point_dispersion > 5] = np.nan
-            global_dispersion = np.nanmean(point_dispersion)
-            point_dispersion[~np.isfinite(point_dispersion)] = global_dispersion
-            genewise_dispersion = np.nanmean(point_dispersion, axis=0)
-            genewise_dispersion = pd.Series( (genewise_dispersion-global_dispersion)/2+global_dispersion, index=self.adata.var.index.tolist())
+#             # Fit global dispersion
+#             point_dispersion = (resid_variance-pred)/pred**2
+#             point_dispersion[point_dispersion < 0] = np.nan
+#             point_dispersion[point_dispersion > 5] = np.nan
+#             global_dispersion = np.nanmean(point_dispersion)
+#             point_dispersion[~np.isfinite(point_dispersion)] = global_dispersion
+#             genewise_dispersion = np.nanmean(point_dispersion, axis=0)
+#             genewise_dispersion = pd.Series( (genewise_dispersion-global_dispersion)/2+global_dispersion, index=self.adata.var.index.tolist())
                         
             # Compute coef, se and pval for fits
             result = []
@@ -394,12 +401,23 @@ class MementoRNA(MementoBase):
                 endog = fit['endog']
                 
                 intra_var = quasi_nb_var(pred, intra_var_scale, intra_var_dispersion)
-                inter_var = genewise_dispersion[fit['gene']]*pred**(2+correction)
+                inter_var = 0.4*pred**2
                 total_var = intra_var + inter_var
                 
+                # try:
                 W = (pred**2) / total_var
                 se = np.sqrt(np.diag(np.linalg.pinv(X.T@np.diag(W)@X)))[-1]
                 pv = 2*stats.norm.sf(np.abs(coef/se))
+                # except:
+                #     logging.error(', '.join([
+                #         f'differential_mean: gene: {fit["gene"]}',
+                #         f'treatment: {fit["t"]}', 
+                #         f'intra: {intra_var}', 
+                #         f'inter_var: {inter_var}',
+                #         f'global_disp: {global_dispersion}',
+                #         f'correction: {correction}',
+                #         ]))
+                #     se, pv = np.nan, np.nan
                 
                 result.append((fit['gene'], fit['t'], coef, se, pv))
             return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'se','pval']).set_index('gene')
