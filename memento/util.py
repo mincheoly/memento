@@ -4,6 +4,7 @@ import time
 import itertools
 import scipy as sp
 import statsmodels.api as sm
+import logging
 from statsmodels.stats.multitest import fdrcorrection
 from pymare import estimators
 from scipy.optimize import minimize_scalar, minimize
@@ -247,11 +248,20 @@ def fit_loglinear(endog, exog, offset, gene, t):
     """
         Fit a loglinear model and return the predicted means and model
     """
-    fit = sm.GLM(
-        endog, 
-        exog, 
-        offset=offset,
-        family=sm.families.Poisson()).fit()
+    
+    try:
+        fit = sm.GLM(
+            endog, 
+            exog, 
+            offset=offset,
+            family=sm.families.Poisson()).fit()
+    except:
+        fit = sm.GLM(
+            endog,
+            exog,
+            offset=offset,
+            family=sm.families.Gaussian(sm.families.links.log())).fit()
+        logging.warn(f'fit_loglinear: {gene}, {t} fitted with OLS')
     
     return {
         'gene':gene, 
@@ -269,8 +279,9 @@ def quasi_nb_var(mean, scale, dispersion):
 
 def quasi_nb_objective(scale, dispersion, mean, variance):
     
-    pred_y = np.log(quasi_nb_var(mean, scale, dispersion))
-    y = np.log(variance)
+    valid = (mean > 0) & (variance > 0)
+    pred_y = np.log(quasi_nb_var(mean[valid], scale, dispersion))
+    y = np.log(variance[valid])
     
     return ((pred_y-y)**2).mean()
     
@@ -278,7 +289,7 @@ def quasi_nb_objective(scale, dispersion, mean, variance):
 def fit_quasi_nb(mean, variance):
 
     dispersion0 = 1
-    scale0 = np.median((mean/variance))
+    scale0 = np.median((mean[variance > 0]/variance[variance > 0]))
         
     optim_obj = lambda params: quasi_nb_objective(params[0], params[1], mean, variance)
 
@@ -286,5 +297,6 @@ def fit_quasi_nb(mean, variance):
         optim_obj, 
         [scale0, dispersion0],
         bounds=[(1e-5,None), (1e-10, 10)],
+        method='Nelder-Mead',
     )
     return res.x

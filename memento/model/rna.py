@@ -377,7 +377,8 @@ class MementoRNA(MementoBase):
             
             result = []
             for fit in regression_fits:
-                coef = fit['model'].params[t]
+
+                coef = fit['model'].params[fit['t']]
                 X = fit['design'].values
                 pred = fit['pred']
                 endog = fit['endog']
