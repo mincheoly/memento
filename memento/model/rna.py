@@ -377,14 +377,15 @@ class MementoRNA(MementoBase):
             
             result = []
             for fit in regression_fits:
-
                 coef = fit['model'].params[fit['t']]
                 X = fit['design'].values
                 pred = fit['pred']
                 endog = fit['endog']
                 
                 intra_var = quasi_nb_var(pred, intra_var_scale, intra_var_dispersion)
+                # intra_var = pred
                 inter_var = global_dispersion*pred**2
+                # inter_var = dispersions[fit['gene']]*pred**2
                 total_var = intra_var + inter_var
                 
                 try:
