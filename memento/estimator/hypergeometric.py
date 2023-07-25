@@ -21,12 +21,12 @@ def fill_invalid(val, group_name):
 
     if num_invalid == val.shape[0]:
         # if all values are invalid, there are no valid values to choose from, so return all nans
-        logging.warning(f"all bootstrap variances are invalid for group {group_name}")
-        return np.full(shape=val.shape, fill_value=np.nan)
+        logging.info(f"all bootstrap variances are invalid for group {group_name}")
+        return True, np.full(shape=val.shape, fill_value=np.nan)
 
     val[invalid_mask] = np.random.choice(val[~invalid_mask], num_invalid)
     
-    return val
+    return False, val
 
 
 def unique_expr(expr, size_factor):
@@ -175,7 +175,11 @@ def hg_sev_for_gene(
         inverse_size_factor_sq=inv_sf_sq
     )
 
-    var = fill_invalid(var, group_name)
+    all_nan, var = fill_invalid(var, group_name)
+    
+    if all_nan:
+        return 0, 0, 0, 0
+    
     res_var = residual_variance(mean, var, mv_fit)
     
     if return_boot_samples:

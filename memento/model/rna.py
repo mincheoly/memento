@@ -231,6 +231,7 @@ class MementoRNA(MementoBase):
                 if get_se:
                     
                     estimates['se_mean'][group] = np.sqrt(sample_variance(X=data, size_factor=sf)/data.shape[0])
+                    estimates['se_mean'][group][estimates['se_mean'][group] == 0] = np.sqrt(estimates['mean'][group][estimates['se_mean'][group] == 0])
                     estimates['se_sum'][group] = np.sqrt(sample_variance(X=data, size_factor=np.ones(data.shape[0]))*data.shape[0])
                     valid_idx = estimates['mean'][group] > estimates['se_mean'][group]
                     se_log_mean_full = (
@@ -305,7 +306,7 @@ class MementoRNA(MementoBase):
         self, 
         covariates: pd.DataFrame,
         treatments: pd.DataFrame,
-        estimator='mean',
+        estimator='log_mean',
         treatment_for_gene: dict = None,
         family: str = 'quasiGLM',
         dispersions: np.array = None,
@@ -368,12 +369,20 @@ class MementoRNA(MementoBase):
             endog = np.array([fit['endog'] for fit in regression_fits]).T
             resid_variance = ((pred-endog)**2)
             
-            finite = (pred > 0) & (resid_variance > 0)
-            x = np.log(pred[finite])
-            y = np.log(resid_variance[finite])
-            
-            _, inter, _, _, _ = stats.linregress(x,y)
-            global_dispersion = np.exp(inter)
+            finite = (pred > 0) & (resid_variance > 1e-3)
+            if finite.sum() == 0:
+                global_dispersion = 0
+            else:
+                x = np.log(pred[finite])
+                y = np.log(resid_variance[finite])
+                
+                x_high = x[x > np.quantile(x, 0.8)]
+                y_high = y[x > np.quantile(x, 0.8)]
+
+                _, inter, _, _, _ = stats.linregress(x,y)
+
+                global_dispersion = np.exp(inter)
+            logging.info(f'differential_mean: global dispersion estimate is {global_dispersion}')
             
             result = []
             for fit in regression_fits:
@@ -382,8 +391,8 @@ class MementoRNA(MementoBase):
                 pred = fit['pred']
                 endog = fit['endog']
                 
-                intra_var = quasi_nb_var(pred, intra_var_scale, intra_var_dispersion)
-                # intra_var = pred
+                # intra_var = quasi_nb_var(pred, intra_var_scale, intra_var_dispersion)
+                intra_var = sampling_variance[fit['gene']].values
                 inter_var = global_dispersion*pred**2
                 # inter_var = dispersions[fit['gene']]*pred**2
                 total_var = intra_var + inter_var
@@ -407,51 +416,6 @@ class MementoRNA(MementoBase):
                 result.append((fit['gene'], fit['t'], coef, se, pv))
                 
             return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'se','pval']).set_index('gene')
-            
-
-        if family == 'WGLM':
-            # "Counts" to use in GLM
-            expr = (
-                test_estimates['mean']/
-                self.adata.uns['memento']['umi_depth']*
-                test_estimates['total_umi'].values)
-            
-            # Moments to estimate sample-wise dispersion
-            mean = test_estimates['mean'].values
-            sampling_variance = test_estimates['se_mean'].values**2
-            sample_dispersions = get_nb_sample_dispersions(mean, sampling_variance)
-            norm_dispersions = dispersions/dispersions.mean()
-
-            
-            tests = []  
-            for idx, gene in enumerate(expr.columns):
-                
-                if treatment_for_gene is not None:
-                    if gene in treatment_for_gene: # Get treatments for this gene
-                        treatment_list = treatment_for_gene[gene]
-                    else: # Pass this gene
-                        continue
-                else: # Default, get all pairwise treatment-gene tests
-                    treatment_list = treatments.columns
-                    
-                for t in treatment_list:
-                    
-                    design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
-
-                    tests.append(
-                        partial(
-                            wald_nb,
-                            endog=expr.iloc[:, idx].values, 
-                            exog=design_matrix,
-                            offset=np.log(test_estimates['total_umi']['total_umi'].values), 
-                            sample_dispersion=sample_dispersions,
-                            gene_dispersion=norm_dispersions[idx],
-                            gene=gene, 
-                            t=t))
-                    
-            # Compute the tests in parallel
-            result = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in tests)
-            return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'pval']).set_index('gene')
     
         if family == 'WLS':
 
@@ -489,3 +453,54 @@ class MementoRNA(MementoBase):
             # Compute the tests in parallel
             result = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in tests)
             return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'se','pval']).set_index('gene')
+        
+        
+    def differential_var(
+        self, 
+        covariates: pd.DataFrame,
+        treatments: pd.DataFrame,
+        estimator='log_resvar',
+        treatment_for_gene: dict = None,
+        n_jobs=1,
+        verbose=0):
+        """ Perform differential expression using the given design matrix. """
+        
+        # Index the estimates by the groups actually present
+        groups_in_test = covariates.index.tolist()
+        test_estimates = {est:res.loc[groups_in_test] for est,res in self.estimates.items()}
+    
+        expr = test_estimates[estimator]
+        expr_sem = test_estimates['se_' + estimator]
+        min_sem = expr_sem[expr_sem > 0].min(axis=0)
+        for col in expr_sem.columns:
+            expr_sem[col] = expr_sem[col].replace(0.0, min_sem[col])
+
+        # Construct the tests
+        tests = []  
+        for idx, gene in enumerate(expr.columns):
+
+            if treatment_for_gene is not None:
+                if gene in treatment_for_gene: # Get treatments for this gene
+                    treatment_list = treatment_for_gene[gene]
+                else: # Pass this gene
+                    continue
+            else: # Default, get all pairwise treatment-gene tests
+                treatment_list = treatments.columns
+
+            for t in treatment_list:
+
+                design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
+
+                tests.append(
+                    partial(
+                        meta_wls,
+                        y=expr.iloc[:, [idx]].values, 
+                        X=design_matrix.values,
+                        v=expr_sem.iloc[:, [idx]].values**2,
+                        gene=gene, 
+                        t=t))
+
+        # Compute the tests in parallel
+        result = Parallel(n_jobs=n_jobs, verbose=verbose)(delayed(func)() for func in tests)
+        return pd.DataFrame(result, columns=['gene', 'treatment', 'coef', 'se','pval']).set_index('gene')
+

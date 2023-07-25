@@ -250,11 +250,10 @@ def fit_loglinear(endog, exog, offset, gene, t):
     """
     
     try:
-        fit = sm.GLM(
+        fit = sm.Poisson(
             endog, 
             exog, 
-            offset=offset,
-            family=sm.families.Poisson()).fit()
+            offset=offset).fit(disp=0)
     except:
         fit = sm.GLM(
             endog,
