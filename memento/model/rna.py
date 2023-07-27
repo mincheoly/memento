@@ -447,6 +447,7 @@ class MementoRNA(MementoBase):
                             y=expr.iloc[:, [idx]].values, 
                             X=design_matrix.values,
                             v=expr_sem.iloc[:, [idx]].values**2,
+                            n=test_estimates['cell_count'].values,
                             gene=gene, 
                             t=t))
                     
@@ -490,13 +491,18 @@ class MementoRNA(MementoBase):
             for t in treatment_list:
 
                 design_matrix = pd.concat([covariates, treatments[[t]]], axis=1)
+                X = design_matrix.values
+                y = expr.iloc[:, [idx]].values
+                v = expr_sem.iloc[:, [idx]].values**2
+                valid = (np.isfinite(y) & np.isfinite(v)).ravel()
 
                 tests.append(
                     partial(
                         meta_wls,
-                        y=expr.iloc[:, [idx]].values, 
-                        X=design_matrix.values,
-                        v=expr_sem.iloc[:, [idx]].values**2,
+                        y=y[valid], 
+                        X=design_matrix.iloc[valid],
+                        v=v[valid],
+                        n=test_estimates['cell_count'].values[valid],
                         gene=gene, 
                         t=t))
 

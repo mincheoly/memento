@@ -8,7 +8,7 @@ import logging
 from statsmodels.stats.multitest import fdrcorrection
 from pymare import estimators
 from scipy.optimize import minimize_scalar, minimize
-
+from sklearn.linear_model import LinearRegression
 
 
 def bin_size_factor(size_factor, num_bins=30):
@@ -128,14 +128,19 @@ def lrt_nb(endog, exog, exog0, offset, weights=None, dispersion=None, gene=None,
     return((gene, t, fit.params[-1], pv))
 
 
-def meta_wls(y, X, v, gene=None, t=None):
+def meta_wls(y, X, v, n,gene=None, t=None):
     
     try:
+        
         dsl = estimators.WeightedLeastSquares()
         dsl.fit(y=y, X=X, v=v)
-        coef = float(dsl.summary().get_fe_stats()['est'][-1])
+        lm = LinearRegression(fit_intercept=False)
+        lm.fit(X,y.ravel(), n.ravel())
+        coef = float(lm.coef_[-1])
+        # coef = float(dsl.summary().get_fe_stats()['est'][-1])
         se = float(dsl.summary().get_fe_stats()['se'][-1])
-        p = float(dsl.summary().get_fe_stats()['p'][-1])
+        p = 2*stats.norm.sf(np.abs(coef/se))
+        # p = float(dsl.summary().get_fe_stats()['p'][-1])
         
         # model = sm.OLS(y, X).fit()
         # coef = model.params[-1]
