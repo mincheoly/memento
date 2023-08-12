@@ -4,7 +4,7 @@ import numpy as np
 import scipy.sparse as sparse
 import scipy.stats as stats
 
-from memento.estimator.sample import sample_variance
+from memento.estimator.sample import sample_mean, sample_variance
 
 
 def return_float(val):
@@ -54,8 +54,10 @@ def unique_expr(expr, size_factor):
 
 def hg_mean(X: sparse.csc_matrix, size_factor: np.array):
     """ Inverse variance weighted mean. """
+    
+    return sample_mean(X, size_factor)
 
-    mean = (X.sum(axis=0).A1+1)/(size_factor.sum()+1)
+    # mean = (X.sum(axis=0).A1)/(size_factor.sum())
     
     return return_float(mean)
 
@@ -69,8 +71,9 @@ def bootstrap_mean_for_gene(
         inverse_size_factor_sq: np.array
 ):
     """ Compute the bootstrapped variances for a single gene expression frequencies."""
-
-    means = ((unique_expr * bootstrap_freq).sum(axis=0)+1) / ((bootstrap_freq/inverse_size_factor).sum(axis=0)+1)
+    
+    means = (unique_expr*bootstrap_freq*inverse_size_factor).sum(axis=0)/n_obs
+    # means = ((unique_expr * bootstrap_freq).sum(axis=0)+1) / ((bootstrap_freq/inverse_size_factor).sum(axis=0)+1)
 
     return means
 
@@ -86,6 +89,8 @@ def hg_sem_for_gene(
     """ Compute the standard error of the variance for a SINGLE gene. """
     
     n_obs = X.shape[0]
+    if len(X.data) == 0:
+        return np.nan, np.nan, np.nan, np.nan
     inv_sf, inv_sf_sq, expr, counts = unique_expr(X, approx_size_factor)
 
     gen = np.random.Generator(np.random.PCG64(5))
@@ -105,7 +110,7 @@ def hg_sem_for_gene(
 
     sem = np.nanstd(mean)
     ses = np.nanstd(mean*((gene_rvs/inv_sf).sum(axis=0)+1))
-    selm = np.nanstd(np.log(mean))
+    selm = np.nanstd(np.log(mean[mean>0]))
     sel1pm = np.nanstd(np.log(mean+1))
     
     return sem, ses, selm, sel1pm

@@ -132,13 +132,16 @@ def meta_wls(y, X, v, n,gene=None, t=None):
     
     try:
         
-        dsl = estimators.WeightedLeastSquares()
+        dsl = estimators.DerSimonianLaird()
         dsl.fit(y=y, X=X, v=v)
         lm = LinearRegression(fit_intercept=False)
         lm.fit(X,y.ravel(), n.ravel())
         coef = float(lm.coef_[-1])
         # coef = float(dsl.summary().get_fe_stats()['est'][-1])
-        se = float(dsl.summary().get_fe_stats()['se'][-1])
+        W = 1/(v.ravel())
+        # X = X[:, [-1]]
+        se = np.sqrt(np.diag(np.linalg.pinv(X.T@np.diag(W)@X))[-1])
+        # se = float(dsl.summary().get_fe_stats()['se'][-1])
         p = 2*stats.norm.sf(np.abs(coef/se))
         # p = float(dsl.summary().get_fe_stats()['p'][-1])
         
