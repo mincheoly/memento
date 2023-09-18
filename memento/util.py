@@ -6,7 +6,6 @@ import scipy as sp
 import statsmodels.api as sm
 import logging
 from statsmodels.stats.multitest import fdrcorrection
-from pymare import estimators
 from scipy.optimize import minimize_scalar, minimize
 from sklearn.linear_model import LinearRegression
 
@@ -130,26 +129,19 @@ def lrt_nb(endog, exog, exog0, offset, weights=None, dispersion=None, gene=None,
 
 def meta_wls(y, X, v, n,gene=None, t=None):
     
-    try:
+    # try:
+    if X.shape[0] < 2:
+        return ((gene, t, np.nan, np.nan, 1))
         
-        dsl = estimators.DerSimonianLaird()
-        dsl.fit(y=y, X=X, v=v)
-        lm = LinearRegression(fit_intercept=False)
-        lm.fit(X,y.ravel(), n.ravel())
-        coef = float(lm.coef_[-1])
-        # coef = float(dsl.summary().get_fe_stats()['est'][-1])
-        W = 1/(v.ravel())
-        # X = X[:, [-1]]
-        se = np.sqrt(np.diag(np.linalg.pinv(X.T@np.diag(W)@X))[-1])
-        # se = float(dsl.summary().get_fe_stats()['se'][-1])
-        p = 2*stats.norm.sf(np.abs(coef/se))
-        # p = float(dsl.summary().get_fe_stats()['p'][-1])
+    lm = LinearRegression(fit_intercept=False)
+    lm.fit(X,y.ravel(), n.ravel())
+    coef = float(lm.coef_[-1])
+    W = 1/(v.ravel())
+    se = np.sqrt(np.diag(np.linalg.pinv(X.T@np.diag(W)@X))[-1])
+    p = 2*stats.norm.sf(np.abs(coef/se))
         
-        # model = sm.OLS(y, X).fit()
-        # coef = model.params[-1]
-        # p = model.pvalues[-1]
-    except:
-        return((gene, t, 0, 0, 1))
+    # except:
+    #     return((gene, t, 0, 0, 1))
     
     return ((gene, t, coef, se, p))
 

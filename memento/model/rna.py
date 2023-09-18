@@ -506,7 +506,7 @@ class MementoRNA(MementoBase):
                     partial(
                         meta_wls,
                         y=y[valid], 
-                        X=design_matrix.iloc[valid],
+                        X=X[valid],
                         v=v[valid],
                         n=test_estimates['cell_count'].values[valid],
                         gene=gene, 
