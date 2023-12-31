@@ -59,14 +59,41 @@ class RNAHypergeometric(EstimatorBase):
         return variance
     
     
-    def covariance(self, data: sparse.csr_matrix, size_factor: np.array):
+    def covariance(self, data: sparse.csr_matrix, size_factor: np.array, idx1: np.array, idx2: np.array):
         
-        pass
+        n_obs = data.shape[0]
+        overlap_location = (idx1 == idx2)
+        overlap_idx = [i for i,j in zip(idx1, idx2) if i == j]
+        
+        row_weight = np.sqrt(1/size_factor**2).reshape([1, -1])
+        X, Y = data[:, idx1].T.multiply(row_weight).T.tocsr(), data[:, idx2].T.multiply(row_weight).T.tocsr()
+        
+        prod = X.multiply(Y).sum(axis=0).A1/n_obs
+        if len(overlap_idx) >0:
+            prod[overlap_location] = prod[overlap_location] - (1-self.q)*data[:, overlap_idx].T.multiply(row_weight**2).T.tocsr().sum(axis=0).A1/n_obs
+        cov = prod - X.mean(axis=0).A1*Y.mean(axis=0).A1
+        
+        return cov
     
     
-    def bootstrap_mean(self, values: np.array, freq: np.array, inv_sf: np.array, inv_sf_sq: np.array):
+    def correlation(self, data: sparse.csr_matrix, size_factor: np.array, idx1: np.array, idx2: np.array):
+    
+        cov = self.covariance(data, size_factor, idx1, idx2)
+        
+        var1 = self.variance(data[:, idx1], size_factor)
+        var2 = self.variance(data[:, idx2], size_factor)
+        
+        return cov/(np.sqrt(var1)*np.sqrt(var2))
+    
+    
+    def bootstrap_mean(
+        self, 
+        values: np.array, 
+        freq: np.array, 
+        inv_sf: np.array, 
+        inv_sf_sq: np.array):
         """
-            Computes the mean from bootstrapped values and frequencies. 
+            Computes the mean from bootstrapped expression values and frequencies. 
             
             :values: expression values
             :freq: frequencies of the :values:
@@ -74,10 +101,12 @@ class RNAHypergeometric(EstimatorBase):
             :inv_sf_sq: inverse of cell sizes squared
         """
         
-        pass
+        n_obs = freq.sum()
+        
+        return (values*freq*inv_sf).sum(axis=0)/n_obs
 
     
-    def bootstrap_mean(
+    def bootstrap_variance(
         self, 
         values: np.array, 
         freq: np.array, 
@@ -92,4 +121,10 @@ class RNAHypergeometric(EstimatorBase):
             :inv_sf_sq: inverse of cell sizes squared
         """
         
-        pass
+        n_obs = freq.sum()
+        
+        mm_M1 = (values*freq*inv_sf).sum(axis=0)/n_obs
+        mm_M2 = (values**2*freq*inv_sf_sq - (1-self.q)*data[0]*data[1]*inv_sf_sq).sum(axis=0)/n_obs
+        mm_var = (mm_M2 - mm_M1**2)
+        
+        return mm_var
